@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/cts//**)",
+      "Bash(/c/cts/Scripts/python.exe --version)",
+      "Read(//c/cts/Scripts//**)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(\"/d/LEARN AND DEV/python.exe\" --version)",
+      "Read(//d/LEARN AND DEV//**)",
+      "Bash(where python:*)",
+      "Bash(ls /d/Python*)",
+      "Read(//d//**)",
+      "Bash(cmd.exe /c \"dir D:\\\\Python* /b /s 2>nul | head -5\")",
+      "Bash(cmd.exe /c \"where /r D:\\\\ python.exe 2>nul\")",
+      "Bash(cmd.exe /c \"dir D:\\\\Python* /b 2>nul\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem -Path 'D:\\\\' -Filter 'python.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 5 FullName\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem -Path 'D:\\\\' -Filter 'python*.exe' -Recurse -ErrorAction SilentlyContinue | Where-Object { \\\\$_.DirectoryName -notlike '*venv*' -and \\\\$_.DirectoryName -notlike '*.venv*' } | Select-Object -First 10 FullName\")",
+      "Bash(powershell.exe -Command \"& 'D:\\\\LEARN AND DEV\\\\python.exe' --version 2>&1\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem -Path 'D:\\\\LEARN AND DEV\\\\' -Name | Select-Object -First 20\")"
+    ]
+  }
+}

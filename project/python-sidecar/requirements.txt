@@ -1,0 +1,56 @@
+# TradeOS Python Sidecar — requirements.txt
+# All open-source, zero licensing cost
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# HMM engine (core algorithm)
+hmmlearn==0.3.3
+
+# SMC / Smart Money Concepts
+smartmoneyconcepts==0.0.26
+
+# Technical analysis
+pandas-ta==0.4.71b0
+
+# Backtesting
+backtesting==0.3.3
+vectorbt==0.28.5
+
+# Data providers
+MetaTrader5==5.0.5640       # Windows only; comment out on Linux
+yfinance==0.2.51
+
+# Scientific computing
+scipy==1.15.2
+numpy>=2.2.6
+pandas>=2.3.2
+
+# ML utilities
+scikit-learn==1.6.1
+
+# Serialization
+joblib==1.4.2                # model.pkl serialization
+
+# Database (for direct DB writes if needed)
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+
+# Redis cache
+redis==5.2.1
+
+# Validation
+pydantic==2.10.6
+pydantic-settings==2.7.1
+
+# HTTP client
+httpx==0.28.1
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Utilities (all stdlib or already included)
+# hashlib — stdlib
+# json — stdlib
+# logging — stdlib

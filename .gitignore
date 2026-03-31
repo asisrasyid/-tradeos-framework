@@ -1,0 +1,55 @@
+# ── Secrets & Environment ──────────────────────────────────────────────────
+.env
+*.env
+!.env.example
+
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+*.pkl
+*.pickle
+
+# lib_local (compiled binaries for specific Python version)
+project/python-sidecar/lib_local/
+
+# ── Node.js / Frontend ─────────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+*.local
+
+# ── .NET / C# ──────────────────────────────────────────────────────────────
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.nupkg
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+logs/
+*.log.*
+
+# ── OS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+
+# ── Database ───────────────────────────────────────────────────────────────
+*.sqlite
+*.db
+pgdata/

@@ -1,0 +1,127 @@
+version: "3.9"
+
+# =============================================================================
+# TradeOS — Docker Compose
+# Services: db, redis, api, python, frontend
+# Run: docker compose up -d
+# =============================================================================
+
+services:
+
+  # ─── PostgreSQL 15 ──────────────────────────────────────────────────────
+  tradeos-db:
+    image: postgres:15-alpine
+    container_name: tradeos-db
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-P@ss1234}
+      POSTGRES_DB:       ${POSTGRES_DB:-tradeos}
+    volumes:
+      - tradeos-pgdata:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tradeos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tradeos-net
+
+  # ─── Redis 7 ────────────────────────────────────────────────────────────
+  tradeos-redis:
+    image: redis:7-alpine
+    container_name: tradeos-redis
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - tradeos-redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - tradeos-net
+
+  # ─── Python FastAPI Sidecar ─────────────────────────────────────────────
+  tradeos-python:
+    build:
+      context: ./python-sidecar
+      dockerfile: Dockerfile
+    container_name: tradeos-python
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-P@ss1234}@tradeos-db:5432/${POSTGRES_DB:-tradeos}
+      REDIS_URL:    redis://tradeos-redis:6379
+    depends_on:
+      tradeos-db:
+        condition: service_healthy
+      tradeos-redis:
+        condition: service_healthy
+    # NOT exposed externally — internal only
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - tradeos-net
+
+  # ─── ASP.NET Core 8 API ─────────────────────────────────────────────────
+  tradeos-api:
+    build:
+      context: ./backend/TradeOS.Api
+      dockerfile: Dockerfile
+    container_name: tradeos-api
+    environment:
+      ConnectionStrings__Default: "Host=tradeos-db;Port=5432;Database=${POSTGRES_DB:-tradeos};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-P@ss1234}"
+      ConnectionStrings__Redis:   "tradeos-redis:6379"
+      Python__BaseUrl:            "${PYTHON_BASE_URL:-http://tradeos-python:8000}"
+      Jwt__Key:                   "${JWT_KEY:-TRADEOS_DEFAULT_DEV_SECRET_CHANGE_IN_PROD_32CHARS!}"
+      Jwt__Issuer:                "${JWT_ISSUER:-TradeOS}"
+      Cors__Origin:               "${CORS_ORIGIN:-http://localhost:3000}"
+      ASPNETCORE_ENVIRONMENT:     "Production"
+    depends_on:
+      tradeos-db:
+        condition: service_healthy
+      tradeos-redis:
+        condition: service_healthy
+      tradeos-python:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - tradeos-net
+
+  # ─── React Frontend (Nginx) ─────────────────────────────────────────────
+  tradeos-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: tradeos-frontend
+    depends_on:
+      tradeos-api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    networks:
+      - tradeos-net
+
+# ─── Volumes ────────────────────────────────────────────────────────────────
+volumes:
+  tradeos-pgdata:
+  tradeos-redisdata:
+
+# ─── Network ────────────────────────────────────────────────────────────────
+networks:
+  tradeos-net:
+    driver: bridge

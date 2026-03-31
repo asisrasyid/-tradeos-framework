@@ -1,0 +1,47 @@
+# requirements-dev.txt — subset ringan untuk development lokal
+# Pakai ini dulu: pip install -r requirements-dev.txt
+# requirements.txt (full) dipakai di production
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# HMM engine
+hmmlearn==0.3.3
+
+# SMC / Smart Money Concepts
+smartmoneyconcepts==0.0.15
+
+# Technical analysis (no strict pin — 0.3.14b0 requires Python>=3.12)
+pandas-ta
+
+# Data provider (fallback — tidak butuh MT5)
+yfinance==0.2.51
+
+# Scientific computing
+scipy==1.15.2
+numpy==2.2.3
+pandas==2.2.3
+
+# ML utilities
+scikit-learn==1.6.1
+
+# Serialization
+joblib==1.4.2
+
+# Database
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+
+# Validation
+pydantic==2.10.6
+pydantic-settings==2.7.1
+
+# HTTP client
+httpx==0.28.1
+
+# NOTE: Tidak termasuk:
+# - MetaTrader5 (butuh MT5 terminal installed, pakai nanti di Phase 5)
+# - vectorbt (besar, pakai kalau backtest advanced dibutuhkan)
+# - backtesting (opsional)
+# - redis (opsional untuk dev)
