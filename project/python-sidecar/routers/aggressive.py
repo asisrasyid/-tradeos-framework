@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from services import aggressive_engine as eng
+from services import mt5_executor
 
 router = APIRouter()
 
@@ -116,3 +117,30 @@ async def stop(req: StopAggressiveRequest):
 @router.get("/status")
 async def status():
     return {"sessions": eng.get_all_status()}
+
+
+class CloseTicketRequest(BaseModel):
+    ticket: int
+
+
+@router.post("/close-ticket")
+async def close_ticket(req: CloseTicketRequest):
+    """
+    Manually close a specific position by ticket.
+    Marks it in the manual-close registry so the engine will NOT re-open it.
+    """
+    # Mark before close — prevents race where poll sees it gone and re-opens
+    eng.mark_manual_close(req.ticket)
+
+    result = mt5_executor.close_position_direct(req.ticket, comment="TradeOS manual close")
+    if not result["success"]:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Close failed retcode={result.get('retcode')} — ticket={req.ticket}",
+        )
+    return {
+        "ticket":  req.ticket,
+        "profit":  result["profit"],
+        "retcode": result["retcode"],
+        "status":  "closed",
+    }

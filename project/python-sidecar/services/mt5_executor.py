@@ -257,3 +257,111 @@ def get_symbol_info(symbol: str) -> Optional[dict]:
         "digits": sym_info.digits,
         "point":  sym_info.point,
     }
+
+
+def calc_tp_price(
+    symbol:        str,
+    action:        str,    # "BUY" | "SELL"
+    fill_price:    float,  # actual fill price from order_send
+    profit_target: float,  # desired profit in account currency (e.g. 3.0 = $3)
+    volume:        float,
+) -> float:
+    """
+    Convert a profit target (USD) to an absolute TP price.
+
+    Formula:
+        price_move = profit_target / (volume × contract_size)
+        BUY:  TP = fill_price + price_move
+        SELL: TP = fill_price − price_move
+
+    Works for any instrument (XAUUSD, EURUSD, indices, etc.)
+    because contract_size is read from symbol_info.
+
+    Standard account: no commission adjustment needed —
+    spread is already embedded in ask/bid prices.
+    """
+    if not _MT5_AVAILABLE or not ensure_connected():
+        raise RuntimeError("MT5 not available for calc_tp_price")
+
+    sym_info = mt5.symbol_info(symbol)
+    if sym_info is None:
+        raise RuntimeError(f"Symbol not found: {symbol}")
+
+    contract_size = sym_info.trade_contract_size   # e.g. 100 for XAUUSD
+    digits        = sym_info.digits
+
+    if volume <= 0 or contract_size <= 0:
+        raise ValueError(f"Invalid volume={volume} or contract_size={contract_size}")
+
+    price_move = profit_target / (volume * contract_size)
+
+    if action.upper() == "BUY":
+        tp = fill_price + price_move
+    else:
+        tp = fill_price - price_move
+
+    return round(tp, digits)
+
+
+def close_position_direct(ticket: int, comment: str = "TradeOS close") -> dict:
+    """
+    Close an open position by ticket directly via MT5 API.
+    No HTTP involved — ~10-30ms latency.
+
+    Returns:
+        dict with keys: success, ticket, profit, retcode
+        On failure: success=False, error key added.
+    """
+    if not _MT5_AVAILABLE:
+        return {"success": False, "ticket": ticket, "profit": 0.0,
+                "error": "MetaTrader5 not available"}
+    if not ensure_connected():
+        return {"success": False, "ticket": ticket, "profit": 0.0,
+                "error": "MT5 not connected"}
+
+    positions = mt5.positions_get(ticket=ticket)
+    if not positions:
+        return {"success": False, "ticket": ticket, "profit": 0.0,
+                "error": f"Position #{ticket} not found"}
+
+    pos    = positions[0]
+    is_buy = pos.type == mt5.ORDER_TYPE_BUY
+    tick   = mt5.symbol_info_tick(pos.symbol)
+    if tick is None:
+        return {"success": False, "ticket": ticket, "profit": 0.0,
+                "error": f"No tick data for {pos.symbol}"}
+
+    price = tick.bid if is_buy else tick.ask
+    request = {
+        "action":       mt5.TRADE_ACTION_DEAL,
+        "symbol":       pos.symbol,
+        "volume":       pos.volume,
+        "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+        "position":     ticket,
+        "price":        price,
+        "deviation":    20,
+        "magic":        pos.magic,
+        "comment":      comment,
+        "type_time":    mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    result = mt5.order_send(request)
+    if result is None:
+        code, msg = mt5.last_error()
+        return {"success": False, "ticket": ticket, "profit": 0.0,
+                "error": f"order_send None [{code}]: {msg}"}
+
+    success = result.retcode == mt5.TRADE_RETCODE_DONE
+    if not success:
+        logger.warning(
+            "[MT5Executor] close_position_direct #%d retcode=%d (%s)",
+            ticket, result.retcode, result.comment,
+        )
+
+    return {
+        "success": success,
+        "ticket":  ticket,
+        "profit":  pos.profit,
+        "retcode": result.retcode,
+    }
