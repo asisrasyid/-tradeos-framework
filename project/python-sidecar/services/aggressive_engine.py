@@ -114,10 +114,11 @@ class AggressiveSession:
     last_action:             str           = "starting"
     error:                   Optional[str] = None
 
-    # ── HMM Gate — danger detection + cooldown ───────────────────────────────
+    # ── HMM Gate — danger detection + condition-based wait ───────────────────
     hmm_gate_enabled:    bool  = False
-    hmm_cooldown_sec:    float = 60.0
-    hmm_cooldown_until:  float = 0.0
+    hmm_cooldown_sec:    float = 10.0   # re-check interval (seconds), NOT a wait timer
+    hmm_in_danger:       bool  = False  # True = danger active, fills paused
+    hmm_last_check:      float = 0.0   # epoch of last HMM API call
     hmm_cooldown_reason: str   = ""
     hmm_vote_last:       str   = ""
 
@@ -278,8 +279,10 @@ def get_all_status() -> list[dict]:
             "total_flips":     s.total_flips,
             "hmm_gate_enabled":       s.hmm_gate_enabled,
             "hmm_cooldown_sec":       s.hmm_cooldown_sec,
-            "hmm_cooldown_remaining": max(0.0, round(s.hmm_cooldown_until - time.time(), 1))
-                                      if s.hmm_gate_enabled else 0.0,
+            "hmm_in_danger":          s.hmm_in_danger,
+            "hmm_recheck_in":         max(0.0, round(
+                                          s.hmm_cooldown_sec - (time.time() - s.hmm_last_check), 1
+                                      )) if s.hmm_in_danger else 0.0,
             "hmm_cooldown_reason":    s.hmm_cooldown_reason,
             "hmm_vote_last":          s.hmm_vote_last,
             "auto_direction_hmm":     s.auto_direction_hmm,
@@ -412,36 +415,62 @@ def _fill_layers(sess: AggressiveSession) -> None:
     if needed <= 0:
         return
 
-    # ── HMM Gate: danger detection + cooldown ────────────────────────────────
+    # ── HMM Gate: condition-based danger wait ────────────────────────────────
+    # hmm_cooldown_sec = re-check interval (not a timer duration)
+    # Flow: danger detected → pause fills → re-check every N sec
+    #       → HMM clears → resume immediately in this same cycle
     if sess.hmm_gate_enabled:
         now = time.time()
-        if now < sess.hmm_cooldown_until:
+
+        if sess.hmm_in_danger:
+            # Still in danger state — check if it's time to re-check
+            since_last = now - sess.hmm_last_check
+            if since_last < sess.hmm_cooldown_sec:
+                recheck_in = int(sess.hmm_cooldown_sec - since_last)
+                sess.last_action = (
+                    f"HMM danger — re-check in {recheck_in}s "
+                    f"({sess.hmm_cooldown_reason})"
+                )
+                return  # not time yet, skip fill
+
+            # Time to re-check
+            sess.hmm_last_check = now
             vote = _hmm_vote(sess.symbol)
             sess.hmm_vote_last = vote
-            if vote == sess.current_direction:
-                sess.hmm_cooldown_until  = 0.0
+
+            opposite = "SELL" if sess.current_direction == "BUY" else "BUY"
+            if vote != opposite:
+                # Danger cleared (vote neutral or confirms direction)
+                sess.hmm_in_danger       = False
                 sess.hmm_cooldown_reason = ""
-                sess.last_action = f"HMM vote {vote} ✓ — cooldown cleared, resuming"
-                logger.info("[AggrEngine] %s HMM vote confirmed %s — cooldown cleared",
+                sess.last_action = (
+                    f"HMM cleared (vote={vote}) — resuming fills"
+                )
+                logger.info("[AggrEngine] %s HMM danger cleared, vote=%s",
                             sess.session_id[:8], vote)
+                # Fall through — fill immediately this cycle
             else:
-                remaining = int(sess.hmm_cooldown_until - now)
                 sess.last_action = (
-                    f"HMM cooldown {remaining}s remaining "
-                    f"(vote={vote} ≠ {sess.current_direction}) — {sess.hmm_cooldown_reason}"
+                    f"HMM still dangerous (vote={vote}) — "
+                    f"re-check in {int(sess.hmm_cooldown_sec)}s"
                 )
-                return
+                return  # still dangerous
+
         else:
-            danger, reason = _hmm_danger_check(sess.symbol, sess.current_direction)
-            if danger:
-                sess.hmm_cooldown_until  = now + sess.hmm_cooldown_sec
-                sess.hmm_cooldown_reason = reason
-                sess.last_action = (
-                    f"HMM GATE ⚠ {reason} — cooldown {sess.hmm_cooldown_sec:.0f}s"
-                )
-                logger.warning("[AggrEngine] %s HMM gate triggered: %s (cooldown=%.0fs)",
-                               sess.session_id[:8], reason, sess.hmm_cooldown_sec)
-                return
+            # Not in danger — pre-fill check (rate-limited by hmm_cooldown_sec)
+            if now - sess.hmm_last_check >= sess.hmm_cooldown_sec:
+                sess.hmm_last_check = now
+                danger, reason = _hmm_danger_check(sess.symbol, sess.current_direction)
+                if danger:
+                    sess.hmm_in_danger       = True
+                    sess.hmm_cooldown_reason = reason
+                    sess.last_action = (
+                        f"HMM GATE ⚠ {reason} — pausing fills, "
+                        f"re-check in {int(sess.hmm_cooldown_sec)}s"
+                    )
+                    logger.warning("[AggrEngine] %s HMM gate: %s (recheck=%.0fs)",
+                                   sess.session_id[:8], reason, sess.hmm_cooldown_sec)
+                    return
 
     opened_this_cycle = 0
 
