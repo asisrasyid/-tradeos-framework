@@ -374,6 +374,26 @@ function AggressiveSessionRow({ sess, onStop, onStopAndClose }: {
               TG
             </span>
           )}
+          {/* HMM Gate — danger state indicator */}
+          {sess.hmm_gate_enabled && sess.active && sess.hmm_in_danger && (
+            <span
+              className="text-xs font-semibold px-2 py-0.5 rounded animate-pulse"
+              title={`HMM validasi background: ${sess.hmm_cooldown_reason} — re-check in ${sess.hmm_recheck_in}s`}
+              style={{ background: '#7c3aed22', color: '#a78bfa', border: '1px solid #7c3aed' }}
+            >
+              ⏳ HMM validasi…
+            </span>
+          )}
+          {/* HMM Gate active but safe */}
+          {sess.hmm_gate_enabled && sess.active && !sess.hmm_in_danger && (
+            <span
+              className="text-xs px-1 py-0.5 rounded"
+              title="HMM Gate aktif — kondisi aman"
+              style={{ background: '#7c3aed11', color: '#7c3aed', border: '1px solid #7c3aed44' }}
+            >
+              HMM
+            </span>
+          )}
           <span className={`badge ${sess.active ? 'badge--warn' : 'badge--neutral'}`}>
             {sess.active ? 'running' : 'stopped'}
           </span>
@@ -422,6 +442,13 @@ function AggressiveSessionRow({ sess, onStop, onStopAndClose }: {
         {sess.active && (sess.sl_cooldown_remaining ?? 0) > 0 && (
           <span className="px-1.5 py-0.5 rounded text-xs font-semibold" style={{ background: 'var(--sell)20', color: 'var(--sell)', border: '1px solid var(--sell)' }}>
             ⏸ cooldown {sess.sl_cooldown_remaining}s
+          </span>
+        )}
+        {sess.hmm_gate_enabled && sess.active && sess.hmm_in_danger && (
+          <span className="px-1.5 py-0.5 rounded text-xs font-semibold animate-pulse"
+            style={{ background: '#7c3aed22', color: '#a78bfa', border: '1px solid #7c3aed' }}>
+            ⏳ HMM danger — re-check {sess.hmm_recheck_in}s
+            {sess.hmm_vote_last ? ` (vote: ${sess.hmm_vote_last})` : ''}
           </span>
         )}
         <span style={{ color: 'var(--text-muted)' }}>
