@@ -503,6 +503,9 @@ def _fill_layers(sess: AggressiveSession) -> None:
             else:
                 sess.consecutive_fill_failures += 1
             continue  # don't go through market order path
+
+        # Market order path
+        ticket = _open_one_position(sess, d)
         if ticket:
             opened_this_cycle += 1
             sess.consecutive_fill_failures = 0
