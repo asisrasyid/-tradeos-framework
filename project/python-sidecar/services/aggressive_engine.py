@@ -1,9 +1,9 @@
 """
-aggressive_engine.py — Aggressive Layer Trading Engine v2
-==========================================================
+aggressive_engine.py — Aggressive Layer Trading Engine v2.1
+============================================================
 
 v2 redesign:
-  - Direct MT5 API calls — no HTTP self-calls (eliminates 50-150ms overhead/order)
+  - Direct MT5 API calls — no HTTP self-calls for order execution (eliminates 50-150ms overhead/order)
   - Broker-side TP — calculated from profit_target input, set at order placement
   - Poll interval 2s — detect TP hit fast (was 5s)
   - Direction logic:
@@ -13,19 +13,30 @@ v2 redesign:
       Priority 4: keep current_direction
   - Manual close registry — mark_manual_close() prevents re-open
   - MCGuard + Profit Guard + per-position SL all preserved (direct MT5)
+
+v2.1 restored features:
+  - HMM Gate — danger detection via /python/analysis/multi-tf before each fill cycle
+  - Auto Direction HMM — confidence-weighted M1+M5+M15 vote for AUTO direction resolution
+  - Limit Orders — ATR-based pending BUY_LIMIT/SELL_LIMIT via mt5_executor.place_limit_order()
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import httpx
+
 from services import equity_cache as _eq_cache
 from services import mt5_executor
+
+# Internal sidecar base URL — HMM analysis calls only (not order execution)
+PYTHON_API = os.getenv("PYTHON_API_URL", "http://localhost:8001")
 
 # ── MT5 direct import ─────────────────────────────────────────────────────────
 try:
@@ -103,6 +114,22 @@ class AggressiveSession:
     last_action:             str           = "starting"
     error:                   Optional[str] = None
 
+    # ── HMM Gate — danger detection + cooldown ───────────────────────────────
+    hmm_gate_enabled:    bool  = False
+    hmm_cooldown_sec:    float = 60.0
+    hmm_cooldown_until:  float = 0.0
+    hmm_cooldown_reason: str   = ""
+    hmm_vote_last:       str   = ""
+
+    # ── Auto Direction via HMM ─────────────────────────────────────────────
+    auto_direction_hmm:  bool  = False
+
+    # ── Limit Orders (pending) ─────────────────────────────────────────────
+    limit_atr_mult:     float = 0.0
+    pending_expiry_sec: float = 15.0
+    pending_tickets:    list  = field(default_factory=list)
+    pending_placed_at:  dict  = field(default_factory=dict)
+
     # ── Profit Guard runtime ───────────────────────────────────────────────────
     peak_profit:         float = 0.0
     floating_pnl:        float = 0.0
@@ -157,11 +184,11 @@ def start_session(
     sl_cooldown_sec:        float = 0.0,
     max_session_loss_usd:   float = 0.0,
     max_drawdown_from_peak: float = 0.0,
-    hmm_gate_enabled:       bool  = False,   # kept for API compat
-    hmm_cooldown_sec:       float = 60.0,    # kept for API compat
-    auto_direction_hmm:     bool  = False,   # kept for API compat
-    limit_atr_mult:         float = 0.0,     # kept for API compat
-    pending_expiry_sec:     float = 15.0,    # kept for API compat
+    hmm_gate_enabled:       bool  = False,
+    hmm_cooldown_sec:       float = 60.0,
+    auto_direction_hmm:     bool  = False,
+    limit_atr_mult:         float = 0.0,
+    pending_expiry_sec:     float = 15.0,
 ) -> str:
     session_id = str(uuid.uuid4())
     sess = AggressiveSession(
@@ -183,6 +210,11 @@ def start_session(
         sl_cooldown_sec      = sl_cooldown_sec,
         max_session_loss_usd    = max_session_loss_usd,
         max_drawdown_from_peak  = max_drawdown_from_peak,
+        hmm_gate_enabled        = hmm_gate_enabled,
+        hmm_cooldown_sec        = hmm_cooldown_sec,
+        auto_direction_hmm      = auto_direction_hmm,
+        limit_atr_mult          = limit_atr_mult,
+        pending_expiry_sec      = pending_expiry_sec,
     )
     _sessions[session_id] = sess
 
@@ -244,6 +276,16 @@ def get_all_status() -> list[dict]:
             "consecutive_connection_failures": s.consecutive_connection_failures,
             "consecutive_tp":  s.consecutive_tp,
             "total_flips":     s.total_flips,
+            "hmm_gate_enabled":       s.hmm_gate_enabled,
+            "hmm_cooldown_sec":       s.hmm_cooldown_sec,
+            "hmm_cooldown_remaining": max(0.0, round(s.hmm_cooldown_until - time.time(), 1))
+                                      if s.hmm_gate_enabled else 0.0,
+            "hmm_cooldown_reason":    s.hmm_cooldown_reason,
+            "hmm_vote_last":          s.hmm_vote_last,
+            "auto_direction_hmm":     s.auto_direction_hmm,
+            "limit_atr_mult":         s.limit_atr_mult,
+            "pending_expiry_sec":     s.pending_expiry_sec,
+            "pending_orders":         len(s.pending_tickets),
             "active":          s.active,
             "active_tickets":  list(s.active_tickets),
             "open_positions":  len(s.active_tickets),
@@ -297,12 +339,18 @@ def _run_session(sess: AggressiveSession) -> None:
     logger.info("[AggrEngine] Thread start %s | %s %s ×%d",
                 sess.session_id[:8], sess.symbol, sess.direction, sess.layers)
     try:
-        # ── AUTO direction: resolve from Daily S/R + EMA20 M5 ────────────────
+        # ── AUTO direction: resolve from HMM vote or Daily S/R + EMA20 M5 ──────
         if sess.direction == "AUTO":
-            sess.last_action = "AUTO: analyzing Daily S/R + EMA20 M5..."
+            if sess.auto_direction_hmm:
+                sess.last_action = "AUTO: analyzing HMM M1+M5+M15 vote..."
+            else:
+                sess.last_action = "AUTO: analyzing Daily S/R + EMA20 M5..."
             resolved = "NEUTRAL"
             for attempt in range(6):   # retry up to ~30s
-                resolved = _decide_direction(sess)
+                if sess.auto_direction_hmm:
+                    resolved = _hmm_vote(sess.symbol)
+                else:
+                    resolved = _decide_direction(sess)
                 if resolved != "NEUTRAL":
                     break
                 logger.info(
@@ -360,9 +408,40 @@ def _fill_layers(sess: AggressiveSession) -> None:
         sess.last_action = f"SL cooldown: {remaining}s remaining"
         return
 
-    needed = sess.layers - len(sess.active_tickets)
+    needed = sess.layers - len(sess.active_tickets) - len(sess.pending_tickets)
     if needed <= 0:
         return
+
+    # ── HMM Gate: danger detection + cooldown ────────────────────────────────
+    if sess.hmm_gate_enabled:
+        now = time.time()
+        if now < sess.hmm_cooldown_until:
+            vote = _hmm_vote(sess.symbol)
+            sess.hmm_vote_last = vote
+            if vote == sess.current_direction:
+                sess.hmm_cooldown_until  = 0.0
+                sess.hmm_cooldown_reason = ""
+                sess.last_action = f"HMM vote {vote} ✓ — cooldown cleared, resuming"
+                logger.info("[AggrEngine] %s HMM vote confirmed %s — cooldown cleared",
+                            sess.session_id[:8], vote)
+            else:
+                remaining = int(sess.hmm_cooldown_until - now)
+                sess.last_action = (
+                    f"HMM cooldown {remaining}s remaining "
+                    f"(vote={vote} ≠ {sess.current_direction}) — {sess.hmm_cooldown_reason}"
+                )
+                return
+        else:
+            danger, reason = _hmm_danger_check(sess.symbol, sess.current_direction)
+            if danger:
+                sess.hmm_cooldown_until  = now + sess.hmm_cooldown_sec
+                sess.hmm_cooldown_reason = reason
+                sess.last_action = (
+                    f"HMM GATE ⚠ {reason} — cooldown {sess.hmm_cooldown_sec:.0f}s"
+                )
+                logger.warning("[AggrEngine] %s HMM gate triggered: %s (cooldown=%.0fs)",
+                               sess.session_id[:8], reason, sess.hmm_cooldown_sec)
+                return
 
     opened_this_cycle = 0
 
@@ -384,7 +463,17 @@ def _fill_layers(sess: AggressiveSession) -> None:
         else:
             d = sess.current_direction
 
-        ticket = _open_one_position(sess, d)
+        # Limit order mode vs market order mode
+        if sess.limit_atr_mult > 0:
+            ticket = _open_limit_position(sess, d)
+            if ticket:
+                sess.pending_tickets.append(ticket)
+                sess.pending_placed_at[ticket] = time.time()
+                opened_this_cycle += 1
+                sess.consecutive_fill_failures = 0
+            else:
+                sess.consecutive_fill_failures += 1
+            continue  # don't go through market order path
         if ticket:
             opened_this_cycle += 1
             sess.consecutive_fill_failures = 0
@@ -452,6 +541,10 @@ def _poll_and_manage(sess: AggressiveSession) -> None:
         return
 
     open_tickets = {p["ticket"] for p in positions}
+
+    # ── Pending order management: detect fills + expiry cancellation ──────────
+    if sess.pending_tickets:
+        _check_pending_orders(sess, open_tickets)
 
     # ── Profit Guard ──────────────────────────────────────────────────────────
     if _check_profit_guard(sess, positions):
@@ -957,6 +1050,207 @@ def _check_profit_guard(sess: AggressiveSession, positions: list[dict]) -> bool:
             return True
 
     return False
+
+
+# ── HMM helpers (HTTP to analysis endpoint) ───────────────────────────────────
+
+def _hmm_vote(symbol: str) -> str:
+    """
+    Query M1+M5+M15 HMM analysis and return confidence-weighted direction.
+    Scoring: sum confidence per action; if ≥65% weight on one side → that direction.
+    Used for: AUTO direction resolution (auto_direction_hmm=True) + cooldown-break vote.
+    Returns: "BUY" | "SELL" | "NEUTRAL"
+    """
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"{PYTHON_API}/python/analysis/multi-tf",
+                json={"instrument": symbol, "timeframes": ["M1", "M5", "M15"]},
+            )
+            resp.raise_for_status()
+            alerts = resp.json()
+
+        buy_score = sell_score = 0.0
+        for alert in alerts:
+            action     = alert.get("action", "NEUTRAL")
+            confidence = float(alert.get("confidence", 0.0))
+            if action == "BUY":
+                buy_score  += confidence
+            elif action == "SELL":
+                sell_score += confidence
+
+        total = buy_score + sell_score
+        if total < 0.5:
+            return "NEUTRAL"
+        ratio = buy_score / total
+        if ratio >= 0.65:
+            return "BUY"
+        if ratio <= 0.35:
+            return "SELL"
+        return "NEUTRAL"
+    except Exception as exc:
+        logger.warning("[AggrEngine] _hmm_vote failed (fail-open): %s", exc)
+        return "NEUTRAL"
+
+
+def _hmm_danger_check(symbol: str, direction: str) -> tuple[bool, str]:
+    """
+    Detect conditions dangerous for `direction` via multi-TF HMM analysis.
+    Fails open: returns (False, "") if endpoint unreachable.
+
+    Danger conditions:
+      - S/R trap: near resistance when BUY, near support when SELL (conf ≥ 0.65)
+      - Extreme momentum reversal risk (MOM severity=danger, action opposes direction)
+      - Cross-TF divergence (DIV tag — always dangerous)
+    """
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.post(
+                f"{PYTHON_API}/python/analysis/multi-tf",
+                json={"instrument": symbol, "timeframes": ["M1", "M5", "M15"]},
+            )
+            resp.raise_for_status()
+            alerts = resp.json()
+
+        for alert in alerts:
+            tag        = alert.get("tag", "")
+            action     = alert.get("action", "NEUTRAL")
+            severity   = alert.get("severity", "info")
+            confidence = float(alert.get("confidence", 0.0))
+
+            if tag == "S/R" and confidence >= 0.65:
+                if (direction == "BUY"  and action == "SELL") or \
+                   (direction == "SELL" and action == "BUY"):
+                    level = "resistance" if direction == "BUY" else "support"
+                    return True, f"S/R trap: near {level} (conf={confidence:.0%})"
+
+            if tag == "MOM" and severity == "danger":
+                if (direction == "BUY"  and action == "SELL") or \
+                   (direction == "SELL" and action == "BUY"):
+                    return True, f"Extreme momentum reversal (conf={confidence:.0%})"
+
+            if tag == "DIV":
+                return True, f"Cross-TF divergence (conf={confidence:.0%})"
+
+        return False, ""
+    except Exception as exc:
+        logger.warning("[AggrEngine] _hmm_danger_check failed (fail-open): %s", exc)
+        return False, ""
+
+
+# ── Limit order helpers ────────────────────────────────────────────────────────
+
+def _open_limit_position(sess: AggressiveSession, direction: str) -> Optional[int]:
+    """
+    Place a BUY_LIMIT / SELL_LIMIT order at current_price ± ATR × limit_atr_mult.
+      BUY:  limit_price = ask - offset  (buy cheaper than current ask)
+      SELL: limit_price = bid + offset  (sell higher than current bid)
+    TP is calculated from limit_price using calc_tp_price.
+    Returns pending order ticket, or None on failure.
+    """
+    if not mt5_executor.is_available():
+        return None
+    try:
+        sym = mt5_executor.get_symbol_info(sess.symbol)
+        if sym is None:
+            return None
+
+        atr = _calc_atr_direct(sess.symbol, _TF_M1, period=14)
+        if atr <= 0:
+            logger.warning("[AggrEngine] %s limit order: ATR=0 — skipping", sess.session_id[:8])
+            return None
+
+        offset  = atr * sess.limit_atr_mult
+        digits  = sym["digits"]
+        is_buy  = direction == "BUY"
+
+        limit_price = round(
+            sym["ask"] - offset if is_buy else sym["bid"] + offset,
+            digits,
+        )
+        tp_price = mt5_executor.calc_tp_price(
+            symbol        = sess.symbol,
+            action        = direction,
+            fill_price    = limit_price,
+            profit_target = sess.profit_target,
+            volume        = sess.volume,
+        )
+
+        result = mt5_executor.place_limit_order(
+            symbol      = sess.symbol,
+            action      = direction,
+            volume      = sess.volume,
+            limit_price = limit_price,
+            tp_price    = tp_price,
+            comment     = f"AggrLmt:{sess.session_id[:8]}",
+        )
+
+        if result["success"]:
+            ticket = result["order_id"]
+            sess.last_action = (
+                f"limit {direction} #{ticket} @{limit_price:.5f} "
+                f"(ATR×{sess.limit_atr_mult}={offset:.5f})"
+            )
+            logger.info("[AggrEngine] %s limit %s #%d @%.5f TP=%.5f",
+                        sess.session_id[:8], direction, ticket, limit_price, tp_price)
+            return ticket
+
+        logger.warning("[AggrEngine] %s limit order FAILED retcode=%s",
+                       sess.session_id[:8], result.get("retcode"))
+        return None
+
+    except Exception as exc:
+        sess.last_action = f"limit order error: {exc}"
+        logger.error("[AggrEngine] %s _open_limit_position: %s", sess.session_id[:8], exc)
+        return None
+
+
+def _check_pending_orders(sess: AggressiveSession, open_tickets: set) -> None:
+    """
+    Called every poll cycle when pending_tickets is non-empty.
+      - Fill detected: ticket gone from pending AND in open positions → promote to active
+      - Expired:       ticket still pending AND placed > pending_expiry_sec ago → cancel
+      - Externally gone: not pending, not open → remove silently
+    """
+    if not mt5_executor.is_available():
+        return
+
+    mt5_pending = mt5_executor.get_pending_tickets()
+    now = time.time()
+
+    for ticket in list(sess.pending_tickets):
+        if ticket in mt5_pending:
+            placed_at = sess.pending_placed_at.get(ticket, now)
+            if now - placed_at >= sess.pending_expiry_sec:
+                _cancel_pending(sess, ticket)
+        else:
+            if ticket in open_tickets:
+                # Filled — promote to active
+                sess.pending_tickets.remove(ticket)
+                sess.pending_placed_at.pop(ticket, None)
+                sess.active_tickets.append(ticket)
+                sess.total_opened += 1
+                sess.last_action   = f"limit #{ticket} FILLED → active"
+                logger.info("[AggrEngine] %s limit #%d filled", sess.session_id[:8], ticket)
+            else:
+                # Gone from both — external cancel or expired
+                sess.pending_tickets.remove(ticket)
+                sess.pending_placed_at.pop(ticket, None)
+                logger.debug("[AggrEngine] %s limit #%d gone (not pending, not active)",
+                             sess.session_id[:8], ticket)
+
+
+def _cancel_pending(sess: AggressiveSession, ticket: int) -> None:
+    """Cancel a pending limit order and remove from session tracking."""
+    ok = mt5_executor.cancel_order(ticket) if mt5_executor.is_available() else False
+    sess.pending_tickets.remove(ticket)
+    sess.pending_placed_at.pop(ticket, None)
+    action = "cancelled" if ok else "cancel-failed (removed from tracking)"
+    sess.last_action = (
+        f"limit #{ticket} expired ({sess.pending_expiry_sec:.0f}s) → {action}"
+    )
+    logger.info("[AggrEngine] %s limit #%d expired → %s",
+                sess.session_id[:8], ticket, action)
 
 
 # ── Math helpers ───────────────────────────────────────────────────────────────
