@@ -28,7 +28,7 @@ router = APIRouter()
 
 # Bars to fetch per timeframe
 BARS_PER_TF: dict[str, int] = {
-    "M1": 60, "M5": 60, "M15": 80, "M30": 80, "H1": 100, "H4": 100,
+    "M1": 200, "M5": 150, "M15": 80, "M30": 80, "H1": 100, "H4": 100,
 }
 
 # Canonical TF sort order for display

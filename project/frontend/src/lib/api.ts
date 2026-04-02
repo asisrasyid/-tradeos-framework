@@ -317,7 +317,8 @@ export interface AggressiveSession {
   total_profit: number; last_action: string; error: string | null; uptime_s: number
   // HMM Gate
   hmm_gate_enabled: boolean; hmm_cooldown_sec: number
-  hmm_cooldown_remaining: number; hmm_cooldown_reason: string; hmm_vote_last: string
+  hmm_in_danger: boolean; hmm_recheck_in: number
+  hmm_cooldown_reason: string; hmm_vote_last: string
   auto_direction_hmm: boolean
   // Limit Order
   limit_atr_mult: number; pending_expiry_sec: number; pending_orders: number
