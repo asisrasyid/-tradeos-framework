@@ -621,15 +621,22 @@ def _poll_and_manage(sess: AggressiveSession) -> None:
         logger.info("[AggrEngine] %s broker TP hit #%d (total wins=%d)",
                     sess.session_id[:8], ticket, sess.total_closed_win)
 
-        # Decide new direction via S/R + trend
+        # Decide new direction: HMM vote (if enabled) else S/R + EMA20
         if sess.direction not in ("BOTH",):
-            new_dir = _decide_direction(sess)
+            if sess.auto_direction_hmm:
+                hmm_dir = _hmm_vote(sess.symbol)
+                new_dir = hmm_dir if hmm_dir != "NEUTRAL" else _decide_direction(sess)
+            else:
+                new_dir = _decide_direction(sess)
             if new_dir != sess.current_direction:
                 _do_flip(sess, f"→ {new_dir}")
 
-    # ── Re-fill after TP or SL ────────────────────────────────────────────────
-    if tp_count > 0 or sl_happened:
-        _fill_layers(sess)
+    # ── Re-fill: always attempt — _fill_layers guards against over-fill.
+    # Unconditional call ensures HMM Gate re-check runs on its own interval
+    # even when active_tickets is empty (no TP/SL to trigger it). Without
+    # this, hmm_in_danger=True with zero open positions causes a permanent
+    # deadlock — fills never resume.
+    _fill_layers(sess)
 
     # ── Update floating PnL for status display ────────────────────────────────
     our_tickets   = set(sess.active_tickets)
@@ -1097,7 +1104,7 @@ def _hmm_vote(symbol: str) -> str:
         with httpx.Client(timeout=10) as client:
             resp = client.post(
                 f"{PYTHON_API}/python/analysis/multi-tf",
-                json={"instrument": symbol, "timeframes": ["M1", "M5", "M15"]},
+                json={"instrument": symbol, "timeframes": ["M5", "M15"]},
             )
             resp.raise_for_status()
             alerts = resp.json()
@@ -1139,7 +1146,7 @@ def _hmm_danger_check(symbol: str, direction: str) -> tuple[bool, str]:
         with httpx.Client(timeout=10) as client:
             resp = client.post(
                 f"{PYTHON_API}/python/analysis/multi-tf",
-                json={"instrument": symbol, "timeframes": ["M1", "M5", "M15"]},
+                json={"instrument": symbol, "timeframes": ["M5", "M15"]},
             )
             resp.raise_for_status()
             alerts = resp.json()

@@ -1,349 +1,637 @@
-# TradeOS — Panduan Trading: Aggressive & Cascade Engine
+# TradeOS — Panduan Aggressive Engine
 
-> Versi: v2.1 | Diperbarui: 2026-03-28
+> Versi: v2.1 | Diperbarui: 2026-04-02
 
 ---
 
 ## Daftar Isi
 
-1. [Konsep Dasar](#konsep-dasar)
-2. [Expected Value (EV) — Matematika Profitabilitas](#expected-value)
-3. [Aggressive Engine](#aggressive-engine)
-4. [Cascade Engine](#cascade-engine)
-5. [HMM Filter — Pre-condition Gate](#hmm-filter)
-6. [MCGuard — Proteksi Equity](#mcguard)
-7. [Profit Guard — Proteksi Session](#profit-guard)
-8. [Rekomendasi Setting per Instrumen](#rekomendasi-setting)
-9. [Troubleshooting](#troubleshooting)
+1. [Gambaran Umum](#gambaran-umum)
+2. [Alur Kerja Engine (Lifecycle)](#alur-kerja-engine)
+3. [Parameter Lengkap](#parameter-lengkap)
+4. [Direction — Cara Engine Menentukan Arah](#direction)
+5. [HMM Gate — Proteksi Kondisi Berbahaya](#hmm-gate)
+6. [Auto Direction HMM](#auto-direction-hmm)
+7. [Limit Orders](#limit-orders)
+8. [SL Cooldown — Anti Revenge Trading](#sl-cooldown)
+9. [Flip Mode — Anti-Trap](#flip-mode)
+10. [MCGuard — Proteksi Equity Account](#mcguard)
+11. [Profit Guard — Proteksi Per-Session](#profit-guard)
+12. [Expected Value — Matematika Profitabilitas](#expected-value)
+13. [Rekomendasi Setting per Instrumen](#rekomendasi-setting)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
-## 1. Konsep Dasar {#konsep-dasar}
+## 1. Gambaran Umum {#gambaran-umum}
 
-TradeOS menjalankan tiga engine yang dapat beroperasi secara bersamaan:
+Aggressive Engine adalah **execution engine berbasis layering**. Prinsipnya sederhana:
 
-| Engine | Strategi | Cocok untuk |
-|--------|----------|-------------|
-| **Aggressive** | Buka N layer sekaligus, tutup tiap layer saat profit_target tercapai, buka ulang | Trending market, high-frequency |
-| **Cascade** | Buka initial_batch, topup saat trend terkonfirmasi | Trend-following dengan DCA |
-| **Signal (HMM)** | Deteksi pola HMM, hasilkan sinyal BUY/SELL | Sumber sinyal untuk Aggressive/Cascade |
+```
+Buka N posisi sekaligus (layers) → tunggu masing-masing mencapai profit_target → tutup → buka ulang
+```
 
-**Prinsip utama:** Aggressive dan Cascade adalah *execution engines*. Signal Engine adalah *filter/gate* opsional yang meningkatkan selektivitas entry.
+Engine berjalan di thread tersendiri, poll setiap **2 detik**, dan berkomunikasi langsung dengan MT5 (bukan via HTTP). Ini menghasilkan eksekusi order yang sangat cepat (10–30ms vs 50–150ms sebelumnya).
+
+**Filosofi utama:** Speed + volume = edge. Banyak posisi kecil yang masing-masing meraih profit kecil, diulang ribuan kali.
+
+**Apa yang dilakukan engine setiap 2 detik:**
+1. Cek MCGuard (proteksi equity) — prioritas tertinggi
+2. Ambil posisi terbuka dari MT5
+3. Kelola pending limit orders (jika aktif)
+4. Cek Profit Guard — stop jika loss melebihi batas
+5. Cek SL per posisi — tutup posisi yang merugi terlalu dalam
+6. Deteksi TP hit dari broker — catat sebagai WIN
+7. Setelah TP: tentukan direction baru (P1→P2→P3→P4)
+8. Panggil `_fill_layers()` — buka posisi baru sampai penuh (dengan HMM Gate di dalamnya)
+9. Update floating PnL untuk tampilan UI
 
 ---
 
-## 2. Expected Value (EV) — Matematika Profitabilitas {#expected-value}
+## 2. Alur Kerja Engine (Lifecycle) {#alur-kerja-engine}
 
-### Formula
-
-```
-EV per siklus = (WinRate × Profit) - (LossRate × Loss)
-```
-
-Dengan parameter default (10 layers, profit_target = $0.50, sl_loss_multiplier = 1.0):
+### Start Session
 
 ```
-Profit per siklus  = 10 layers × $0.50 = $5.00
-Loss per siklus    = 10 layers × ($0.50 × 1.0) = $5.00
+User klik START AGGR
+    ↓
+Engine buat AggressiveSession (semua config tersimpan di sini)
+    ↓
+Thread dimulai (daemon thread, mati otomatis jika main process mati)
+    ↓
+_fill_layers() pertama kali — buka N posisi sesuai layers
+    ↓
+Loop poll setiap 2 detik selama sess.active = True
 ```
 
-| sl_loss_multiplier | Loss per siklus | Win rate break-even |
-|--------------------|-----------------|---------------------|
-| 0.0 (disabled)     | $0              | Engine tidak pernah stop via SL |
-| **1.0 (default)**  | $5.00           | **50% — realistis** |
-| 2.0                | $10.00          | 66.7% |
-| 3.0                | $15.00          | 75% — sangat sulit |
-
-> **Rekomendasi:** Gunakan `sl_loss_multiplier = 1.0`. Dengan winrate 50-55% dari trend filter, EV positif tipis tapi konsisten.
-
-### Contoh kalkulasi nyata (XAUUSDm, 10 layers, vol=0.01):
+### Poll Loop (setiap 2 detik)
 
 ```
-Profit target  = $0.50/pos → $5.00/siklus jika semua menang
-SL threshold   = $0.50 × 1.0 = $0.50/pos → $5.00/siklus jika semua kalah
-Sesudah 10 siklus menang + 10 siklus kalah:
-  Net = (10 × $5.00) - (10 × $5.00) = $0 (break-even di 50%)
-Jika winrate 55%:
-  Net = (11 × $5.00) - (9 × $5.00) = +$10.00 untuk 20 siklus
+MCGuard check
+    ↓ OK
+Ambil posisi dari MT5
+    ↓
+Kelola pending orders
+    ↓
+Profit Guard check
+    ↓ OK
+SL check (per posisi)
+    ↓
+Deteksi closed tickets (TP hit / manual close)
+    ├─ Manual close → catat, TIDAK buka ulang
+    └─ Broker TP   → update wins, tentukan direction baru → _fill_layers()
+    ↓
+_fill_layers() (unconditional — lihat catatan HMM Gate)
+    ↓
+Update floating PnL
+```
+
+> **Catatan penting:** `_fill_layers()` dipanggil unconditional (tanpa kondisi) setiap siklus.
+> Ini disengaja agar HMM Gate bisa re-check secara berkala bahkan saat tidak ada posisi terbuka.
+> Jika dipanggil conditional (hanya setelah TP), HMM Gate yang aktif saat 0 posisi akan deadlock selamanya.
+
+### Stop Session
+
+```
+User klik STOP  →  sess.active = False
+    ↓
+Thread berhenti di siklus berikutnya
+    ↓
+Engine hitung next_recommendation (EMA20 M5 arah saat ini)
+    ↓
+Session tetap di list (stopped state) untuk riwayat
 ```
 
 ---
 
-## 3. Aggressive Engine {#aggressive-engine}
+## 3. Parameter Lengkap {#parameter-lengkap}
 
-### Parameter Lengkap
+### Core Config
 
 | Parameter | Default | Keterangan |
 |-----------|---------|------------|
 | `symbol` | XAUUSDm | Instrumen trading |
-| `direction` | BUY | BUY / SELL / BOTH / AUTO |
-| `layers` | 10 | Jumlah posisi concurrent |
+| `direction` | BUY | `BUY` / `SELL` / `BOTH` / `AUTO` |
+| `layers` | 10 | Jumlah posisi concurrent yang dipertahankan |
 | `volume` | 0.01 | Lot per posisi |
-| `profit_target` | 0.50 | USD profit per posisi untuk trigger close |
-| `sl_loss_multiplier` | **1.0** | Hard SL: tutup jika loss ≥ N × profit_target |
-| `sl_cooldown_sec` | 0.0 | Detik jeda setelah SL sebelum buka ulang |
-| `trend_guided` | **true** | EMA M1+M5+M15 trend filter — default ON (filter taktis utama) |
-| `flip_mode` | none | Anti-trap: none / percentile / counter / hybrid |
+| `profit_target` | 0.50 | USD profit per posisi — dikonversi ke harga TP di broker |
+
+### Risk Controls
+
+| Parameter | Default | Keterangan |
+|-----------|---------|------------|
+| `sl_loss_multiplier` | 0.0 | Hard SL per posisi: tutup jika loss ≥ N × profit_target. `0` = disabled |
+| `sl_cooldown_sec` | 0.0 | Detik jeda setelah SL sebelum buka ulang. `0` = langsung |
+| `max_session_loss_usd` | 0.0 | Stop session jika total loss (realized + floating) ≥ nilai ini. `0` = off |
+| `max_drawdown_from_peak` | 0.0 | Stop jika profit turun N dollar dari peak tertinggi. `0` = off |
 | `mc_guard` | false | Aktifkan MCGuard equity protection |
-| `max_session_loss_usd` | 0.0 | Stop jika net loss session melebihi nilai ini (0=off) |
-| `max_drawdown_from_peak` | 0.0 | Stop jika profit turun dari peak (0=off) |
 
-> **Parameter yang dihapus dari UI:** `sl_pips`, `tp_pips` — selalu 0 (engine monitor profit secara internal).
+### HMM Gate
 
-### SL Cooldown — Anti Revenge Trading
+| Parameter | Default | Keterangan |
+|-----------|---------|------------|
+| `hmm_gate_enabled` | false | Aktifkan HMM Gate |
+| `hmm_cooldown_sec` | 60.0 | Interval re-check (detik) — BUKAN durasi tunggu |
+| `auto_direction_hmm` | false | Gunakan HMM vote untuk menentukan direction setelah TP |
+
+### Entry Orders
+
+| Parameter | Default | Keterangan |
+|-----------|---------|------------|
+| `limit_atr_mult` | 0.0 | Faktor ATR untuk offset limit order. `0` = market order |
+| `pending_expiry_sec` | 15.0 | Detik sebelum pending limit order di-cancel otomatis |
+
+### Flip Mode (Anti-Trap)
+
+| Parameter | Default | Keterangan |
+|-----------|---------|------------|
+| `flip_mode` | none | `none` / `counter` / `percentile` / `hybrid` |
+| `flip_after` | 3 | Jumlah TP beruntun sebelum flip (mode `counter`) |
+| `flip_percentile` | 0.80 | Threshold percentile untuk flip (mode `percentile`) |
+| `lookback_bars` | 20 | Jumlah bar untuk kalkulasi percentile |
+
+> **Parameter deprecated (tetap ada untuk kompatibilitas API):** `sl_pips`, `tp_pips`, `trend_guided` — tidak digunakan. Selalu 0 / diabaikan.
+
+---
+
+## 4. Direction — Cara Engine Menentukan Arah {#direction}
+
+Direction ditentukan **setiap kali setelah TP hit** menggunakan sistem prioritas berlapis:
+
+```
+P1: Daily S/R proximity
+    Apakah harga mendekati level S/R harian?
+    → BUY jika dekat support (bounce ke atas)
+    → SELL jika dekat resistance (bounce ke bawah)
+    → Skip jika tidak ada sinyal S/R
+    ↓ (jika P1 tidak ada sinyal)
+
+P2: EMA20 M5 trend
+    Hitung EMA20 pada timeframe M5
+    → BUY jika EMA20 slope naik
+    → SELL jika EMA20 slope turun
+    → NEUTRAL jika flat
+    ↓ (jika P2 = NEUTRAL)
+
+P3: flip_mode (backward compat)
+    Hanya aktif jika flip_mode ≠ none
+    → counter: flip setelah N TP beruntun
+    → percentile: flip berdasarkan posisi harga relatif
+    → hybrid: gabungan counter + percentile
+    ↓ (jika P3 tidak trigger)
+
+P4: Pertahankan arah saat ini
+    Tidak ada yang berubah → lanjut dengan direction yang sama
+```
+
+### Mode Direction
+
+| Mode | Perilaku |
+|------|----------|
+| `BUY` | Selalu buka posisi BUY. Direction bisa berubah jika P1/P2 mendeteksi kondisi berbeda dan flip terjadi. |
+| `SELL` | Selalu buka posisi SELL. |
+| `BOTH` | Alternasi BUY/SELL bergiliran per posisi (genap=BUY, ganjil=SELL). Tidak terpengaruh P1-P4. |
+| `AUTO` | Resolusi awal menggunakan HMM vote (jika `auto_direction_hmm=True`) atau EMA20 M5. Setelah itu ikuti P1-P4. |
+
+### Tampilan di UI
+
+```
+BUY              → direction tetap
+AUTO→BUY         → AUTO mode, saat ini resolved ke BUY
+BUY→SELL         → direction awal BUY, sekarang flipped ke SELL
+```
+
+---
+
+## 5. HMM Gate — Proteksi Kondisi Berbahaya {#hmm-gate}
+
+### Apa itu HMM Gate?
+
+HMM Gate adalah **firewall pre-fill**. Sebelum engine membuka posisi baru, ia mengecek kondisi market via analisis HMM multi-timeframe (M5 + M15). Jika kondisi berbahaya terdeteksi, fills di-pause.
+
+**Ini BUKAN timer.** HMM Gate tidak menunggu N detik lalu lanjut. Ia menunggu sampai kondisi benar-benar tidak lagi berbahaya.
+
+### Kondisi yang Dianggap Berbahaya
+
+| Tag | Kondisi | Contoh |
+|-----|---------|--------|
+| `S/R` | Harga mendekati resistance saat BUY, atau mendekati support saat SELL (confidence ≥ 65%) | Buka BUY tapi harga tepat di bawah resistance kuat |
+| `MOM` | Momentum ekstrem berlawanan arah (severity=danger) | BUY tapi momentum z-score sangat negatif (oversell parah) |
+| `DIV` | Cross-TF divergence (LTF vs HTF berlawanan) | M5 bullish tapi H1/H4 bearish kuat = bull trap |
+
+Jika **tidak ada** kondisi di atas → aman → fills lanjut normal.
+
+### Lifecycle HMM Gate (Lengkap)
+
+```
+Setiap siklus fill:
+│
+├─ [hmm_in_danger = False] ← kondisi normal
+│   │
+│   └─ Sudah waktunya pre-check? (sejak last_check ≥ hmm_cooldown_sec)
+│       │
+│       ├─ Belum waktunya → lanjut fill normal
+│       │
+│       └─ Waktunya → panggil _hmm_danger_check(symbol, current_direction)
+│           │
+│           ├─ Tidak ada bahaya → lanjut fill normal, catat waktu check
+│           │
+│           └─ BAHAYA TERDETEKSI
+│               → hmm_in_danger = True
+│               → catat reason + waktu check
+│               → LOG WARNING
+│               → return (fill di-skip siklus ini) ← GATE AKTIF
+│
+└─ [hmm_in_danger = True] ← gate sedang aktif, fills paused
+    │
+    └─ Sudah waktunya re-check? (sejak last_check ≥ hmm_cooldown_sec)
+        │
+        ├─ Belum waktunya
+        │   → tampilkan countdown "HMM danger — re-check in Xs"
+        │   → return (tetap paused)
+        │
+        └─ Waktunya → panggil _hmm_vote(symbol) ← cek apakah sudah aman
+            │
+            ├─ Vote TIDAK berlawanan arah (netral atau searah)
+            │   → hmm_in_danger = False ← GATE CLEARED
+            │   → lanjut fill di SIKLUS YANG SAMA INI (tidak tunggu)
+            │
+            └─ Vote MASIH berlawanan
+                → tetap hmm_in_danger = True
+                → countdown reset
+                → return (masih paused)
+```
+
+### Pertanyaan Umum
+
+**Q: Setelah gate cleared, apakah HMM Gate mati?**
+A: **Tidak.** Gate tetap berjalan. Setiap `hmm_cooldown_sec` detik, engine melakukan pre-fill check. Jika kondisi berbahaya muncul lagi (kapanpun), gate **akan aktif lagi otomatis**.
+
+**Q: Berapa kali gate bisa aktif dalam satu session?**
+A: Tidak terbatas. Selama session aktif dan `hmm_gate_enabled=True`, siklus ini berjalan selamanya.
+
+**Q: Apa yang terjadi jika server analisis HMM tidak bisa dihubungi?**
+A: **Fail-open** — dianggap tidak ada bahaya, fills lanjut normal. Engine tidak berhenti hanya karena endpoint analisis tidak responsif.
+
+**Q: Apakah posisi yang sudah terbuka ikut ditutup saat gate aktif?**
+A: **Tidak.** Gate hanya memblokir pembukaan posisi baru. Posisi yang sudah terbuka tetap berjalan, TP/SL tetap aktif di broker.
+
+### Setting hmm_cooldown_sec
+
+```
+hmm_cooldown_sec = 30   → check setiap 30 detik (reaktif, cocok untuk M1/M5 trading)
+hmm_cooldown_sec = 60   → check setiap 1 menit (default, balance antara responsif dan API load)
+hmm_cooldown_sec = 120  → check setiap 2 menit (konservatif, cocok untuk M15+ trading)
+```
+
+### Tampilan di UI (Session Card)
+
+| Badge | Kondisi | Arti |
+|-------|---------|------|
+| `HMM` (ungu redup) | Gate aktif, kondisi aman | Normal — gate berjalan, tidak ada bahaya |
+| `⏳ HMM 45s` (ungu terang, berkedip) | Gate aktif, dalam danger | Fills di-pause, re-check dalam 45 detik. Hover untuk lihat alasan. |
+| _(tidak ada badge)_ | Gate disabled | `hmm_gate_enabled = false` |
+
+---
+
+## 6. Auto Direction HMM {#auto-direction-hmm}
+
+Jika `auto_direction_hmm = True`, setelah setiap **TP hit**, engine menggunakan HMM vote untuk menentukan direction berikutnya (bukan hanya EMA20 M5).
+
+### Cara Kerja Vote
+
+```python
+# Query /python/analysis/multi-tf dengan timeframes=["M5", "M15"]
+# Kumpulkan confidence per arah:
+buy_score  = sum(confidence) untuk semua alert dengan action=BUY
+sell_score = sum(confidence) untuk semua alert dengan action=SELL
+
+total = buy_score + sell_score
+if total < 0.5:      → NEUTRAL (sinyal terlalu lemah)
+if buy/total ≥ 0.65: → BUY (65% weight atau lebih ke BUY)
+if buy/total ≤ 0.35: → SELL (65% weight atau lebih ke SELL)
+else:                → NEUTRAL
+```
+
+### Priority setelah TP (dengan auto_direction_hmm=True)
+
+```
+HMM vote (M5+M15)
+    ├─ BUY atau SELL → gunakan langsung sebagai direction baru
+    └─ NEUTRAL       → fallback ke _decide_direction() normal (P1→P2→P3→P4)
+```
+
+### Kapan Gunakan auto_direction_hmm?
+
+- Saat market sering berganti arah (ranging/choppy)
+- Saat `direction=AUTO` untuk resolusi arah awal
+- Sebaiknya **tidak** diaktifkan saat trending kuat (HMM bisa terlambat menangkap tren panjang)
+
+---
+
+## 7. Limit Orders {#limit-orders}
+
+Jika `limit_atr_mult > 0`, engine tidak membuka market order. Sebaliknya, ia menempatkan **pending limit order** pada harga yang lebih baik (offset dari harga saat ini berdasarkan ATR).
+
+### Cara Kerja
+
+```
+limit_atr_mult = 0.5
+ATR current    = $0.80
+
+BUY_LIMIT ditempatkan di: current_price - (0.5 × $0.80) = $0.40 di bawah harga saat ini
+SELL_LIMIT ditempatkan di: current_price + (0.5 × $0.80) = $0.40 di atas harga saat ini
+```
+
+Logika: masuk di posisi yang lebih baik (sedikit pullback/retracement) daripada langsung di market price.
+
+### Pending Order Management
+
+Setiap 2 detik, engine cek semua pending orders:
+- **Jika terisi** → pindah dari `pending_tickets` ke `active_tickets`
+- **Jika sudah `pending_expiry_sec` detik tidak terisi** → auto-cancel via MT5
+
+```
+limit_atr_mult = 0.5, pending_expiry_sec = 15
+
+→ Limit order ditempatkan
+→ Jika 15 detik tidak ada fill → cancel
+→ Buka market order sebagai fallback? → Tidak, tunggu siklus berikutnya
+```
+
+### Kapan Gunakan Limit Orders?
+
+- Market dengan banyak bounce/retracement
+- Saat spread sedang lebar (limit order masuk di spread yang lebih baik)
+- **Jangan** gunakan saat trending kuat (limit order tidak pernah terisi)
+
+---
+
+## 8. SL Cooldown — Anti Revenge Trading {#sl-cooldown}
 
 Setelah SL terpicu, engine menunggu `sl_cooldown_sec` detik sebelum membuka posisi baru.
 
 ```
 sl_cooldown_sec = 0    → langsung buka ulang (default, mode agresif)
 sl_cooldown_sec = 30   → tunggu 30 detik
+sl_cooldown_sec = 60   → tunggu 1 menit
 sl_cooldown_sec = 300  → tunggu 5 menit (mode konservatif)
 ```
 
-Di UI, badge merah **"⏸ cooldown Xs"** muncul di session card saat cooldown aktif.
+**Tanda di UI:** Badge merah `⏸ Xs` di session card menunjukkan SL cooldown aktif beserta sisa detiknya.
 
 **Kapan gunakan cooldown?**
-- Market choppy / sideway: `sl_cooldown_sec = 60-300`
-- Trending kuat: `sl_cooldown_sec = 0-30`
-
-### Trend EMA (Cara Kerja Internal)
-
-Engine menggunakan **EMA yang benar** (bukan SMA) untuk deteksi trend:
-
-```python
-# EMA yang benar:
-alpha = 2 / (period + 1)
-EMA = price × alpha + EMA_prev × (1 - alpha)
-
-# EMA5 lebih responsif (bereaksi cepat terhadap perubahan harga)
-# EMA10 lebih smooth (filter noise)
-# Sinyal: EMA5 > EMA10 → BUY, EMA5 < EMA10 → SELL
-```
-
-> **Catatan:** Sebelum v2.1, engine menggunakan SMA (rata-rata aritmatik) yang terlalu lambat. Sekarang sudah diperbaiki ke EMA sejati.
+- Market choppy / sideways: `sl_cooldown_sec = 60–300`
+- Trending kuat: `sl_cooldown_sec = 0–30`
+- Saat SL sering beruntun (revenge pattern): `sl_cooldown_sec = 120`
 
 ---
 
-## 4. Cascade Engine {#cascade-engine}
+## 9. Flip Mode — Anti-Trap {#flip-mode}
 
-### Parameter Lengkap
+Flip mode adalah mekanisme **P3 dalam direction decision** — hanya aktif jika P1 (Daily S/R) dan P2 (EMA20) tidak memberikan sinyal.
 
-| Parameter | Default | Keterangan |
-|-----------|---------|------------|
-| `symbol` | XAUUSDm | Instrumen trading |
-| `initial_batch` | 10 | Posisi yang dibuka di awal |
-| `topup_batch` | 5 | Posisi tambahan per topup saat trend terkonfirmasi |
-| `volume` | 0.01 | Lot per posisi |
-| `profit_target` | 2.0 | USD profit target per posisi (threshold besar karena DCA) |
-| `sl_loss_multiplier` | **1.0** | Hard SL threshold multiplier |
-| `max_positions` | 30 | Maksimum total posisi terbuka |
-| `eval_interval` | 300 | Interval evaluasi topup (detik) |
+| Mode | Perilaku |
+|------|----------|
+| `none` | Tidak ada flip otomatis. Arah dipertahankan kecuali P1/P2 berkata beda. |
+| `counter` | Flip arah setelah `flip_after` TP berturut-turut. Asumsi: tren biasanya membalik setelah banyak win beruntun. |
+| `percentile` | Flip jika harga close saat ini di atas `flip_percentile` (untuk SELL) atau di bawah (1-flip_percentile) (untuk BUY) dari range `lookback_bars` bar terakhir. |
+| `hybrid` | Gabungan counter + percentile. Flip hanya jika KEDUANYA setuju. Lebih selektif. |
 
-### Alur Cascade
-
-```
-[Start] → Buka initial_batch posisi
-    ↓
-[Setiap eval_interval detik]
-    ↓
-Cek trend (M1 + M5 + M15) ← arah dari multi-timeframe
-    ↓ trend terkonfirmasi + (HMM filter lulus jika aktif)
-Buka topup_batch posisi baru
-    ↓
-Ulangi sampai max_positions tercapai atau stop manual
-```
-
-> **Perbaikan v2.1:** Initial direction sekarang menggunakan M1+M5+M15 (sama dengan evaluasi topup). Sebelumnya hanya M15 yang menyebabkan inkonsistensi arah awal.
+> **Rekomendasi:** `flip_mode = none` untuk sebagian besar kondisi. P1 (Daily S/R) dan P2 (EMA20) sudah lebih reliabel dari counter/percentile sederhana.
 
 ---
 
-## 5. HMM Advisory — Session Decision Support {#hmm-filter}
+## 10. MCGuard — Proteksi Equity Account {#mcguard}
 
-### Filosofi: Dua Level Keputusan
+MCGuard memantau free margin account secara real-time. Aktif jika `mc_guard = True`.
 
+### Level MCGuard
+
+| Level | Kondisi | Tindakan |
+|-------|---------|---------|
+| `OK` | Free margin normal | Tidak ada tindakan |
+| `CAUTION` | Free margin mulai tertekan | Log warning, fills lanjut |
+| `WARNING` | Free margin lebih rendah | Fill di-block sementara |
+| `DANGER` | Free margin kritis | Tutup 3 posisi terburuk, skip fill siklus ini |
+| `EMERGENCY` | Free margin sangat kritis | Tutup SEMUA posisi, stop session |
+
+Parameter terkait:
 ```
-LEVEL STRATEGIS  →  HMM Signal Engine
-(kapan MULAI session)     "Apakah setup saat ini layak untuk launch?"
-                           Keputusan TRADER, bukan engine otomatis
-
-LEVEL TAKTIS     →  EMA Trend (trend_guided = true, DEFAULT ON)
-(kapan BUKA posisi)        Real-time, M1+M5+M15 majority vote
-                           Dijalankan oleh ENGINE secara otomatis
+mc_level_pct         = 0.10  → trigger saat equity ≤ 10% balance
+safety_multiplier    = 3.0   → kurangi volume ke 1/3 di level WARNING
+emergency_multiplier = 1.5   → kurangi lagi ke 1/1.5 di level DANGER
 ```
 
-**Mengapa HMM tidak dipakai sebagai per-position gate:**
-
-HMM bekerja pada M15 bar close — artinya sinyal baru muncul setiap 15 menit. Jika digunakan sebagai filter per-posisi, engine hanya bisa buka posisi dalam 5 menit pertama setelah sinyal (hmm_max_age_s=300), lalu BLOCKED selama 10 menit berikutnya. Ini membunuh filosofi "speed + volume = edge" dari Aggressive engine.
-
-### HMM Advisory Badge di UI
-
-Di atas form Start Session, terdapat badge informasi HMM yang refresh setiap 30 detik:
-
-| Badge | Warna | Arti |
-|-------|-------|------|
-| `HMM: BUY 0.72 \| 2m` | Hijau | Sinyal BUY fresh, similarity 0.72, 2 menit lalu |
-| `HMM: SELL 0.65 \| 8m` | Kuning | Sinyal ada tapi mulai stale (>5 menit) |
-| `HMM: no signal` | Abu | Tidak ada sinyal untuk symbol ini |
-| `HMM offline` | Abu | Signal Engine tidak running |
-
-**Badge ini hanya informatif** — tidak memblokir engine apapun.
-
-### Cara Trading dengan Signal Engine + Aggressive (Recommended Flow)
-
-1. Buka tab Signal Engine, start session untuk symbol yang sama (misal XAUUSDm)
-2. Tunggu badge HMM berubah ke **hijau** (sinyal fresh muncul)
-3. Perhatikan arah sinyal (BUY/SELL) dan similarity score
-4. Jika setup cocok dengan analisa Anda → start Aggressive session
-5. Engine berjalan dengan `trend_guided = true` (EMA M1+M5+M15) sebagai filter taktis
-
-### Signal Engine No-Signal Warning
-
-Jika Signal Engine berjalan lebih dari 20 bar (≈5 jam di M15) tanpa sinyal yang fire, akan muncul log WARNING:
-```
-[Engine] XAUUSDm/M15: No signal fired after 20 bars. Check pattern_states configuration.
-```
-Dan field `no_signal_warning: true` muncul di status. Ini menandakan `pattern_states` mungkin tidak cocok dengan kondisi market saat ini.
+**Koordinasi antar session:** Jika multiple session aktif dan semua MCGuard mencapai EMERGENCY, hanya **satu** yang akan mengeksekusi close-all (menggunakan claim token eksklusif). Session lain akan stop tanpa close.
 
 ---
 
-## 6. MCGuard — Proteksi Equity {#mcguard}
+## 11. Profit Guard — Proteksi Per-Session {#profit-guard}
 
-MCGuard memantau equity account secara real-time dan mengurangi lot saat mendekati margin call.
-
-```
-mc_level_pct = 0.10  → trigger saat equity ≤ 10% dari balance
-safety_multiplier = 3.0  → kurangi volume ke 1/3 dari normal
-emergency_multiplier = 1.5  → jika masih turun, kurangi lagi ke 1/1.5
-```
-
-**Cascade** selalu mengaktifkan MCGuard secara internal. **Aggressive** membutuhkan `mc_guard = true`.
-
----
-
-## 7. Profit Guard — Proteksi Session {#profit-guard}
-
-Dua mekanisme proteksi profit per session:
+Dua mekanisme proteksi profit yang dievaluasi setiap siklus:
 
 ### Floor Loss (max_session_loss_usd)
 
 ```
-max_session_loss_usd = 10.0  → stop session jika net loss (realized + floating) ≥ $10
-max_session_loss_usd = 0.0   → disabled
+max_session_loss_usd = 10.0
+→ Hitung: realized_pnl + floating_pnl (semua posisi terbuka)
+→ Jika total ≤ -$10 → tutup semua posisi → stop session
 ```
 
-### Drawdown dari Peak (max_drawdown_from_peak)
+### Peak Drawdown (max_drawdown_from_peak)
 
 ```
-max_drawdown_from_peak = 5.0  → stop jika profit turun $5 dari peak tertinggi
-                                 Contoh: profit mencapai $8, lalu turun ke $3 → STOP
-max_drawdown_from_peak = 0.0  → disabled
+max_drawdown_from_peak = 5.0
+→ Pantau peak_profit (profit tertinggi yang pernah dicapai session ini)
+→ Jika current_net < peak_profit - $5 → tutup semua → stop session
+
+Contoh:
+  Profit naik ke $8 (peak = $8)
+  Profit turun ke $2.90 ($8 - $2.90 = $5.10 > $5) → STOP
 ```
 
-> Net loss = `realized_pnl + floating_pnl` (mencakup posisi terbuka)
+> Gunakan keduanya bersama untuk perlindungan dua arah:
+> `max_session_loss_usd` = batas kerugian absolut
+> `max_drawdown_from_peak` = batas kerugian relatif dari puncak
 
 ---
 
-## 8. Rekomendasi Setting per Instrumen {#rekomendasi-setting}
+## 12. Expected Value — Matematika Profitabilitas {#expected-value}
 
-### XAUUSDm (Gold)
+### Formula
 
 ```
-volume             = 0.01
-layers             = 10
-profit_target      = 0.50
-sl_loss_multiplier = 1.0
-sl_cooldown_sec    = 30
-trend_guided       = true  ← default on, tidak perlu diset manual
-max_session_loss_usd    = 8.0
-max_drawdown_from_peak  = 4.0
+EV per siklus = (WinRate × Profit per siklus) − (LossRate × Loss per siklus)
+```
+
+### Contoh (10 layers, profit_target = $0.50, sl_loss_multiplier = 1.0)
+
+```
+Profit per siklus = 10 × $0.50 = $5.00
+Loss per siklus   = 10 × ($0.50 × 1.0) = $5.00
+Break-even winrate = 50%
+```
+
+| sl_loss_multiplier | Break-even WR | Catatan |
+|--------------------|---------------|---------|
+| 0.0 (disabled) | 0% (tidak ada SL) | Berisiko tinggi jika posisi tidak pernah TP |
+| **1.0** | **50%** | **Default — realistis** |
+| 2.0 | 66.7% | Perlu winrate tinggi |
+| 3.0 | 75% | Sangat sulit dicapai |
+
+### Contoh Nyata (XAUUSDm, vol=0.01, 20 siklus)
+
+```
+Winrate 50%: (10 × $5) − (10 × $5) = $0.00 (break-even)
+Winrate 55%: (11 × $5) − (9 × $5)  = +$10.00 (11 win, 9 loss)
+Winrate 60%: (12 × $5) − (8 × $5)  = +$20.00
+```
+
+**Kesimpulan:** Di `sl_loss_multiplier = 1.0`, bahkan winrate 52% sudah menghasilkan EV positif. Target realistis dengan trend filter aktif.
+
+---
+
+## 13. Rekomendasi Setting per Instrumen {#rekomendasi-setting}
+
+### XAUUSDm (Gold) — Recommended Start
+
+```
+symbol                 = XAUUSDm
+direction              = AUTO
+layers                 = 10
+volume                 = 0.01
+profit_target          = 0.50
+sl_loss_multiplier     = 1.0
+sl_cooldown_sec        = 30
+hmm_gate_enabled       = true
+hmm_cooldown_sec       = 60
+auto_direction_hmm     = true
+max_session_loss_usd   = 8.0
+max_drawdown_from_peak = 4.0
+```
+
+### XAUUSDm — Mode Konservatif
+
+```
+layers                 = 5
+volume                 = 0.01
+profit_target          = 0.80
+sl_loss_multiplier     = 1.0
+sl_cooldown_sec        = 120
+hmm_gate_enabled       = true
+hmm_cooldown_sec       = 60
+max_session_loss_usd   = 5.0
+max_drawdown_from_peak = 3.0
 ```
 
 ### BTCUSDm (Bitcoin)
 
 ```
-volume             = 0.01
-layers             = 5     ← kurangi layer karena volatilitas tinggi
-profit_target      = 1.0   ← target lebih besar karena spread/volatilitas
-sl_loss_multiplier = 1.0
-sl_cooldown_sec    = 60    ← cooldown lebih panjang
-trend_guided       = true  ← default on
-max_session_loss_usd    = 10.0
-max_drawdown_from_peak  = 5.0
+layers                 = 5      ← kurangi karena volatilitas tinggi
+volume                 = 0.01
+profit_target          = 1.50   ← target lebih besar
+sl_loss_multiplier     = 1.0
+sl_cooldown_sec        = 60
+hmm_gate_enabled       = true
+hmm_cooldown_sec       = 60
+max_session_loss_usd   = 10.0
+max_drawdown_from_peak = 5.0
 ```
 
 ### Forex (EURUSD, GBPUSD, dll)
 
 ```
-volume             = 0.10  ← pip value lebih kecil
-layers             = 10
-profit_target      = 0.30  ← target lebih kecil karena spread kecil
-sl_loss_multiplier = 1.0
-sl_cooldown_sec    = 15
-trend_guided       = true  ← default on
-max_session_loss_usd    = 5.0
-max_drawdown_from_peak  = 3.0
-```
-
-### Cascade XAUUSDm
-
-```
-initial_batch      = 5     ← mulai kecil
-topup_batch        = 3
-volume             = 0.01
-profit_target      = 1.50
-sl_loss_multiplier = 1.0
-eval_interval      = 300
-max_positions      = 20
-max_session_loss_usd    = 15.0
-max_drawdown_from_peak  = 8.0
+layers                 = 10
+volume                 = 0.10   ← pip value lebih kecil
+profit_target          = 0.30   ← spread lebih kecil
+sl_loss_multiplier     = 1.0
+sl_cooldown_sec        = 15
+hmm_gate_enabled       = true
+hmm_cooldown_sec       = 60
+max_session_loss_usd   = 5.0
+max_drawdown_from_peak = 3.0
 ```
 
 ---
 
-## 9. Troubleshooting {#troubleshooting}
+## 14. Troubleshooting {#troubleshooting}
 
 ### Session terus SL, tidak pernah TP
 
 **Kemungkinan penyebab:**
-1. `sl_loss_multiplier` terlalu kecil (misal 0.1) → SL terlalu dekat
-2. `profit_target` terlalu besar → posisi tidak pernah mencapai target sebelum market berbalik
-3. Direction salah (BUY di downtrend)
+1. `sl_loss_multiplier` terlalu kecil (misal 0.3) → SL terlalu dekat dengan noise market
+2. `profit_target` terlalu besar → harga tidak mencapai target sebelum berbalik
+3. Direction salah (BUY di downtrend, SELL di uptrend)
 
 **Solusi:**
-- Set `sl_loss_multiplier = 1.0`
-- Aktifkan `trend_guided = true`
-- Aktifkan `hmm_filter = true` untuk filter entry yang lebih selektif
-- Set `sl_cooldown_sec = 60` untuk hindari revenge trading
-
-### HMM Filter tidak pernah lulus (posisi tidak terbuka)
-
-**Kemungkinan penyebab:**
-1. Signal Engine tidak running untuk symbol yang sama
-2. `hmm_min_similarity` terlalu tinggi
-3. `hmm_max_age_s` terlalu kecil (sinyal sudah expired)
-
-**Solusi:**
-- Pastikan Signal Engine running: cek `GET /python/signal-engine/status`
-- Turunkan `hmm_min_similarity` ke 0.55
-- Naikkan `hmm_max_age_s` ke 600
-
-### Session zombie (tidak ada aktivitas, status running)
-
-Engine secara otomatis mendeteksi kegagalan koneksi MT5. Setelah **5 kegagalan berturut-turut**, session akan auto-stop dengan status `error_zombie`.
-
-Jika terjadi:
-1. Cek koneksi MT5 terminal
-2. Restart MT5 terminal
-3. Start session baru
-
-### Cooldown badge merah muncul terus-menerus
-
-Artinya SL sering terpicu. Ini normal jika:
-- Market sideways dengan `sl_cooldown_sec` yang panjang
-- `sl_loss_multiplier` rendah sehingga SL cepat tercapai
-
-Pertimbangkan menghentikan session dan menunggu kondisi market yang lebih trending.
+- Pastikan `sl_loss_multiplier = 1.0` (minimal)
+- Aktifkan `hmm_gate_enabled = true` untuk hindari entry saat kondisi berbahaya
+- Naikkan `sl_cooldown_sec = 60–120` untuk hindari revenge pattern
 
 ---
 
-*TradeOS v2.2 — Phase 1-4: EMA fix, SL Cooldown, zombie detection, Profit Guard, HMM reposisi sebagai advisory tool, MCGuard shared equity cache, fill failure backoff, session cleanup, Signal Engine no-signal warning.*
+### HMM Gate terus aktif, fills tidak pernah resume
+
+**Kemungkinan penyebab:**
+1. Market benar-benar dalam kondisi berbahaya (divergence H1 vs M5 — ini memang harus di-pause)
+2. `hmm_cooldown_sec` terlalu panjang (misal 600 detik = 10 menit)
+3. Server analisis HMM tidak bisa diakses (endpoint `/python/analysis/multi-tf` down)
+
+**Solusi:**
+- Cek log engine untuk alasan gate aktif (terlihat di `last_action` session card)
+- Turunkan `hmm_cooldown_sec` ke 30–60 detik agar re-check lebih sering
+- Jika server down: gate fail-open (aman), tapi re-check tidak bisa resolve → restart sidecar
+
+---
+
+### Session zombie (status running tapi tidak ada aktivitas)
+
+Engine mendeteksi kegagalan koneksi MT5 secara otomatis. Setelah **5 kegagalan berturut-turut**, session auto-stop dengan error `MT5 connection lost`.
+
+**Solusi:**
+1. Cek koneksi MT5 terminal (login, server, internet)
+2. Restart MT5 terminal
+3. Start session baru
+
+---
+
+### SL cooldown badge muncul terus-menerus
+
+Artinya SL sering beruntun — biasanya terjadi saat:
+- Market sideways/choppy dengan momentum tidak konsisten
+- `sl_loss_multiplier` terlalu kecil
+- Direction bertentangan dengan tren utama
+
+**Solusi:**
+- Hentikan session, tunggu kondisi lebih jelas
+- Aktifkan `hmm_gate_enabled = true` untuk filter entry
+- Naikkan `profit_target` agar TP lebih mudah tercapai sebelum reversal
+
+---
+
+### Fill failures berulang (posisi tidak terbuka)
+
+Engine memiliki backoff otomatis setelah fill failure. Setelah **10 consecutive failures**, session auto-stop.
+
+**Kemungkinan penyebab:**
+1. MT5 tidak terhubung ke broker
+2. Margin tidak cukup untuk volume yang diminta
+3. Simbol tidak tersedia / market tutup
+
+**Solusi:**
+- Cek margin account
+- Kurangi `volume` atau `layers`
+- Verifikasi simbol aktif di MT5
+
+---
+
+### next_recommendation setelah stop tidak akurat
+
+`next_recommendation` dihitung dari EMA20 M5 saat session berhenti — ini hanya snapshot satu momen. Jika market bergerak setelah session stop, rekomendasi bisa basi.
+
+Selalu konfirmasi dengan analisis sendiri sebelum start session baru.
+
+---
+
+*TradeOS Aggressive Engine v2.1 — Direct MT5, Broker TP, HMM Gate, Auto Direction HMM, Limit Orders, MCGuard, Profit Guard, SL Cooldown, Flip Mode.*

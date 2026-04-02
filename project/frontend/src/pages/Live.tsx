@@ -320,203 +320,155 @@ function AggressiveSessionRow({ sess, onStop, onStopAndClose }: {
   onStop: (id: string) => void
   onStopAndClose: (id: string) => void
 }) {
-  const color  = sess.active ? 'var(--warning)' : 'var(--text-faint)'
-  const profit = sess.total_profit ?? 0
-  const pColor = profit > 0 ? 'var(--buy)' : profit < 0 ? 'var(--sell)' : 'var(--text-muted)'
+  const profit   = sess.total_profit ?? 0
+  const pColor   = profit > 0 ? 'var(--buy)' : profit < 0 ? 'var(--sell)' : 'var(--text-muted)'
+  const dotColor = sess.active ? 'var(--warning)' : 'var(--text-faint)'
+  const currDir  = sess.current_direction ?? sess.direction
+  const dirColor = currDir === 'BUY' ? 'var(--buy)' : currDir === 'SELL' ? 'var(--sell)' : 'var(--accent)'
 
   return (
     <div className="session-row session-row--warn">
-      {/* Row 1: title + status + stop */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full inline-block flex-shrink-0 ${sess.active ? 'animate-pulse' : ''}`}
-            style={{ background: color }} />
-          <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
+
+      {/* Row 1: identity + badges + actions */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
+        {/* Left: symbol · direction badge · size */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flexWrap: 'wrap' }}>
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sess.active ? 'animate-pulse' : ''}`}
+            style={{ background: dotColor }} />
+          <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text)', whiteSpace: 'nowrap' }}>
             {sess.symbol}
-            {' · '}
-            {sess.direction === 'AUTO' ? (
-              <>
-                <span style={{ color: 'var(--accent)' }}>AUTO</span>
-                {sess.current_direction && (
-                  <span style={{ color: sess.current_direction === 'BUY' ? 'var(--buy)' : 'var(--sell)' }}>
-                    {' '}→{sess.current_direction}
-                  </span>
-                )}
-              </>
-            ) : (
-              <>
-                {sess.direction}
-                {sess.current_direction && sess.current_direction !== sess.direction && (
-                  <span style={{ color: sess.current_direction === 'BUY' ? 'var(--buy)' : 'var(--sell)' }}>
-                    {' '}→{sess.current_direction}
-                  </span>
-                )}
-              </>
-            )}
-            {' '}· ×{sess.layers} layers · {sess.volume} lot
           </span>
+          <span style={{
+            padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap',
+            background: currDir === 'BUY' ? '#10b98120' : currDir === 'SELL' ? '#ef444420' : 'var(--accent)18',
+            color: dirColor, border: `1px solid ${dirColor}40`,
+          }}>
+            {sess.direction === 'AUTO'
+              ? `AUTO→${sess.current_direction ?? '?'}`
+              : sess.current_direction && sess.current_direction !== sess.direction
+                ? `${sess.direction}→${sess.current_direction}`
+                : sess.direction}
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+            ×{sess.layers} · {sess.volume}lot
+          </span>
+          {sess.flip_mode && sess.flip_mode !== 'none' && (
+            <span style={{ fontSize: 10, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>
+              flip:{sess.flip_mode}{sess.total_flips > 0 ? ` ×${sess.total_flips}` : ''}
+              {sess.consecutive_tp > 0 ? ` (${sess.consecutive_tp}c)` : ''}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          {/* MCGuard status badge */}
+        {/* Right: status badges + action buttons */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, flexWrap: 'wrap' }}>
           {sess.mc_guard && sess.mc_status && sess.mc_status !== 'OK' && (
-            <span className="text-xs font-bold px-1.5 py-0.5 rounded" style={{
+            <span style={{
+              fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
               background: sess.mc_status === 'EMERGENCY' ? 'var(--sell)' :
                           sess.mc_status === 'DANGER'    ? '#dc2626' :
                           sess.mc_status === 'WARNING'   ? 'var(--warning)' : 'var(--accent)',
               color: '#000',
-            }}>
-              MC:{sess.mc_status}
-            </span>
+            }}>MC:{sess.mc_status}</span>
           )}
-          {/* Trend-guided indicator */}
           {sess.trend_guided && (
-            <span className="text-xs px-1 py-0.5 rounded" style={{ background: 'var(--buy)20', color: 'var(--buy)', border: '1px solid var(--buy)' }}>
-              TG
-            </span>
+            <span style={{ fontSize: 10, padding: '2px 5px', borderRadius: 4, background: 'var(--buy)20', color: 'var(--buy)', border: '1px solid var(--buy)40', fontWeight: 600 }}>TG</span>
           )}
-          {/* HMM Gate — danger state indicator */}
-          {sess.hmm_gate_enabled && sess.active && sess.hmm_in_danger && (
-            <span
-              className="text-xs font-semibold px-2 py-0.5 rounded animate-pulse"
-              title={`HMM validasi background: ${sess.hmm_cooldown_reason} — re-check in ${sess.hmm_recheck_in}s`}
-              style={{ background: '#7c3aed22', color: '#a78bfa', border: '1px solid #7c3aed' }}
-            >
-              ⏳ HMM validasi…
-            </span>
+          {sess.hmm_gate_enabled && sess.active && (
+            sess.hmm_in_danger ? (
+              <span
+                className="animate-pulse"
+                title={`HMM validasi: ${sess.hmm_cooldown_reason} — re-check ${sess.hmm_recheck_in}s${sess.hmm_vote_last ? ` (vote: ${sess.hmm_vote_last})` : ''}`}
+                style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: '#7c3aed22', color: '#a78bfa', border: '1px solid #7c3aed' }}>
+                ⏳ HMM {sess.hmm_recheck_in}s
+              </span>
+            ) : (
+              <span title="HMM Gate aktif — kondisi aman"
+                style={{ fontSize: 10, padding: '2px 5px', borderRadius: 4, background: '#7c3aed11', color: '#7c3aed', border: '1px solid #7c3aed44' }}>
+                HMM
+              </span>
+            )
           )}
-          {/* HMM Gate active but safe */}
-          {sess.hmm_gate_enabled && sess.active && !sess.hmm_in_danger && (
-            <span
-              className="text-xs px-1 py-0.5 rounded"
-              title="HMM Gate aktif — kondisi aman"
-              style={{ background: '#7c3aed11', color: '#7c3aed', border: '1px solid #7c3aed44' }}
-            >
-              HMM
+          {sess.active && (sess.sl_cooldown_remaining ?? 0) > 0 && (
+            <span title="SL cooldown — menunggu sebelum reopen" style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: 'var(--sell)20', color: 'var(--sell)', border: '1px solid var(--sell)' }}>
+              ⏸ {sess.sl_cooldown_remaining}s
             </span>
           )}
           <span className={`badge ${sess.active ? 'badge--warn' : 'badge--neutral'}`}>
             {sess.active ? 'running' : 'stopped'}
           </span>
-          {sess.active && (
-            <>
-              <button
-                onClick={() => onStop(sess.session_id)}
-                className="btn-stop"
-              >
-                STOP
-              </button>
-              <button
-                onClick={() => onStopAndClose(sess.session_id)}
-                className="btn-stop"
-                style={{ background: 'var(--sell)', borderColor: 'var(--sell)' }}
-              >
-                SELL ALL
-              </button>
-            </>
-          )}
+          {sess.active && (<>
+            <button onClick={() => onStop(sess.session_id)} className="btn-stop">STOP</button>
+            <button onClick={() => onStopAndClose(sess.session_id)} className="btn-stop"
+              style={{ background: 'var(--sell)', borderColor: 'var(--sell)' }}>SELL ALL</button>
+          </>)}
         </div>
       </div>
 
-      {/* Row 2: stats */}
-      <div className="flex items-center gap-4 text-xs flex-wrap">
-        <span style={{ color: 'var(--text-muted)' }}>
-          Open: <span className="font-semibold" style={{ color: 'var(--text)' }}>{sess.open_positions}</span>
-          {(sess.pending_orders ?? 0) > 0 && (
-            <span title="Pending limit orders waiting to be filled" style={{ color: '#34d399', marginLeft: 2 }}>
-              +{sess.pending_orders}⏳
-            </span>
+      {/* Row 2: stats (left) + P&L (right) */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        {/* Left: positions · trade counts · uptime */}
+        <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'var(--text-muted)', flexWrap: 'wrap', alignItems: 'center' }}>
+          <span>
+            <b style={{ color: 'var(--text)' }}>{sess.open_positions}</b>
+            {(sess.pending_orders ?? 0) > 0 && (
+              <span title="Pending limit orders" style={{ color: '#34d399', marginLeft: 2 }}>+{sess.pending_orders}⏳</span>
+            )}
+            <span style={{ color: 'var(--text-faint)' }}>/{sess.layers}</span>
+            {' '}open
+          </span>
+          <span>W:<b style={{ color: 'var(--buy)' }}>{sess.total_closed_win}</b></span>
+          {sess.total_closed_sl > 0 && (
+            <span>SL:<b style={{ color: 'var(--sell)' }}>{sess.total_closed_sl}</b></span>
           )}
-          <span style={{ color: 'var(--text-faint)' }}>/{sess.layers}</span>
-        </span>
-        <span style={{ color: 'var(--text-muted)' }}>
-          Wins: <span className="font-semibold" style={{ color: 'var(--buy)' }}>{sess.total_closed_win}</span>
-        </span>
-        <span style={{ color: 'var(--text-muted)' }}>
-          Other: <span style={{ color: 'var(--text)' }}>{sess.total_closed_other}</span>
-        </span>
-        {sess.total_closed_sl > 0 && (
-          <span style={{ color: 'var(--text-muted)' }}>
-            SL: <span style={{ color: 'var(--sell)' }}>{sess.total_closed_sl}</span>
+          {sess.total_closed_other > 0 && (
+            <span>Oth:<b style={{ color: 'var(--text)' }}>{sess.total_closed_other}</b></span>
+          )}
+          <span style={{ color: 'var(--text-faint)', fontSize: 10 }}>
+            Up {Math.floor(sess.uptime_s / 60)}m{sess.uptime_s % 60}s
           </span>
-        )}
-        {sess.active && (sess.sl_cooldown_remaining ?? 0) > 0 && (
-          <span className="px-1.5 py-0.5 rounded text-xs font-semibold" style={{ background: 'var(--sell)20', color: 'var(--sell)', border: '1px solid var(--sell)' }}>
-            ⏸ cooldown {sess.sl_cooldown_remaining}s
-          </span>
-        )}
-        {sess.hmm_gate_enabled && sess.active && sess.hmm_in_danger && (
-          <span className="px-1.5 py-0.5 rounded text-xs font-semibold animate-pulse"
-            style={{ background: '#7c3aed22', color: '#a78bfa', border: '1px solid #7c3aed' }}>
-            ⏳ HMM danger — re-check {sess.hmm_recheck_in}s
-            {sess.hmm_vote_last ? ` (vote: ${sess.hmm_vote_last})` : ''}
-          </span>
-        )}
-        <span style={{ color: 'var(--text-muted)' }}>
-          Total profit: <span className="font-semibold mono" style={{ color: pColor }}>
+          <span style={{ color: 'var(--text-faint)', fontSize: 10 }}>tgt ${sess.profit_target}</span>
+        </div>
+        {/* Right: P&L block — most important metric, prominent display */}
+        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'monospace', color: pColor, lineHeight: 1.1 }}>
             {profit >= 0 ? '+' : ''}${profit.toFixed(2)}
-          </span>
-        </span>
-        <span style={{ color: 'var(--text-muted)' }}>
-          Target: <span style={{ color: 'var(--text)' }}>${sess.profit_target}</span>
-        </span>
-        {sess.flip_mode && sess.flip_mode !== 'none' && (
-          <span style={{ color: 'var(--text-muted)' }}>
-            Flip: <span style={{ color: 'var(--text)' }}>{sess.flip_mode}</span>
-            {sess.total_flips > 0 && (
-              <span style={{ color: 'var(--buy)' }}> ×{sess.total_flips}</span>
-            )}
-            {sess.consecutive_tp > 0 && (
-              <span style={{ color: 'var(--text-faint)' }}> ({sess.consecutive_tp} consec)</span>
-            )}
-          </span>
-        )}
-        <span style={{ color: 'var(--text-faint)' }}>
-          Up {Math.floor(sess.uptime_s / 60)}m {sess.uptime_s % 60}s
-        </span>
-      </div>
-
-      {/* Row 2b: Profit Guard stats (when active or stopped) */}
-      {(sess.peak_profit > 0 || sess.floating_pnl !== 0) && (
-        <div className="flex items-center gap-3 text-xs flex-wrap">
-          <span style={{ color: 'var(--text-muted)' }}>
-            Net: <span className="font-semibold mono" style={{ color: (sess.total_net ?? 0) >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
-              {(sess.total_net ?? 0) >= 0 ? '+' : ''}${(sess.total_net ?? 0).toFixed(2)}
-            </span>
-          </span>
+          </div>
           {sess.floating_pnl !== 0 && (
-            <span style={{ color: 'var(--text-muted)' }}>
-              Float: <span className="mono" style={{ color: sess.floating_pnl >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
-                {sess.floating_pnl >= 0 ? '+' : ''}${sess.floating_pnl.toFixed(2)}
-              </span>
-            </span>
+            <div style={{ fontSize: 10, fontFamily: 'monospace', color: sess.floating_pnl >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
+              float {sess.floating_pnl >= 0 ? '+' : ''}${sess.floating_pnl.toFixed(2)}
+            </div>
           )}
           {sess.peak_profit > 0 && (
-            <span style={{ color: 'var(--text-muted)' }}>
-              Peak: <span className="mono" style={{ color: 'var(--buy)' }}>${sess.peak_profit.toFixed(2)}</span>
-            </span>
+            <div style={{ fontSize: 10, fontFamily: 'monospace', color: 'var(--text-faint)' }}>
+              peak ${sess.peak_profit.toFixed(2)}
+            </div>
+          )}
+          {(sess.total_net ?? 0) !== 0 && (sess.total_net ?? 0) !== profit && (
+            <div style={{ fontSize: 10, fontFamily: 'monospace', color: (sess.total_net ?? 0) >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
+              net {(sess.total_net ?? 0) >= 0 ? '+' : ''}${(sess.total_net ?? 0).toFixed(2)}
+            </div>
           )}
         </div>
-      )}
+      </div>
 
-      {/* Row 3: last action */}
-      <div className="text-xs truncate" style={{ color: sess.error ? 'var(--sell)' : 'var(--text-faint)' }}>
+      {/* Row 3: last action / error */}
+      <div style={{ fontSize: 11, color: sess.error ? 'var(--sell)' : 'var(--text-faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {sess.error ? `ERROR: ${sess.error}` : sess.last_action}
       </div>
 
-      {/* Row 4: recommendation (only when stopped) */}
+      {/* Row 4: recommendation (stopped only) */}
       {!sess.active && sess.next_recommendation && (
-        <div className="flex items-center gap-2 text-xs" style={{ marginTop: '2px' }}>
-          <span style={{ color: 'var(--text-muted)' }}>Rekomendasi sesi berikutnya:</span>
-          <span className="font-bold px-2 py-0.5 rounded" style={{
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginTop: 2 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Next session:</span>
+          <span style={{
+            fontWeight: 700, padding: '1px 8px', borderRadius: 4,
             background: sess.next_recommendation === 'BUY'  ? 'var(--buy)20'  :
                         sess.next_recommendation === 'SELL' ? 'var(--sell)20' : 'var(--surface-2)',
             color:      sess.next_recommendation === 'BUY'  ? 'var(--buy)'  :
                         sess.next_recommendation === 'SELL' ? 'var(--sell)' : 'var(--text-muted)',
             border: `1px solid ${sess.next_recommendation === 'BUY' ? 'var(--buy)' : sess.next_recommendation === 'SELL' ? 'var(--sell)' : 'var(--border)'}`,
-          }}>
-            {sess.next_recommendation}
-          </span>
-          <span style={{ color: 'var(--text-faint)', fontSize: '10px' }}>M1+M5+M15 vote</span>
+          }}>{sess.next_recommendation}</span>
+          <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>M5+M15 vote</span>
         </div>
       )}
     </div>
@@ -541,32 +493,33 @@ function SmartSessionRow({ sess, onStop, onResumeAi }: {
   onResumeAi: (id: string) => void
 }) {
   const isPaused = sess.ai_enabled && sess.ai_status === 'ai_paused'
-  const color  = isPaused ? 'var(--warning)' : sess.active ? '#a78bfa' : 'var(--text-faint)'
-  const profit = sess.total_profit ?? 0
-  const pColor = profit > 0 ? 'var(--buy)' : profit < 0 ? 'var(--sell)' : 'var(--text-muted)'
+  const dotColor = isPaused ? 'var(--warning)' : sess.active ? '#a78bfa' : 'var(--text-faint)'
+  const profit   = sess.total_profit ?? 0
+  const pColor   = profit > 0 ? 'var(--buy)' : profit < 0 ? 'var(--sell)' : 'var(--text-muted)'
 
   return (
     <div className={`session-row ${isPaused ? 'session-row--warn' : sess.active ? 'session-row--smart' : 'session-row--stopped'}`}>
 
-      {/* Row 1: title + badges + buttons */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full inline-block flex-shrink-0 ${sess.active && !isPaused ? 'animate-pulse' : ''}`}
-            style={{ background: color }} />
-          <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
-            {sess.symbol} · {sess.timeframe} · ×{sess.max_layers} · {sess.volume} lot
+      {/* Row 1: identity + badges + actions */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flexWrap: 'wrap' }}>
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sess.active && !isPaused ? 'animate-pulse' : ''}`}
+            style={{ background: dotColor }} />
+          <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text)', whiteSpace: 'nowrap' }}>
+            {sess.symbol}
           </span>
-          {sess.ai_enabled && (
-            <span className="badge badge--ai">AI</span>
-          )}
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+            {sess.timeframe} · ×{sess.max_layers} · {sess.volume}lot
+          </span>
+          {sess.ai_enabled && <span className="badge badge--ai">AI</span>}
           {sess.allow_short
-            ? <span className="text-xs px-1 py-0.5 rounded" style={{ background: '#ef444420', color: 'var(--sell)', border: '1px solid #ef444440', fontWeight: 700 }}>SHORT ON</span>
-            : <span className="text-xs px-1 py-0.5 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-faint)', border: '1px solid var(--border)' }}>LONG ONLY</span>
+            ? <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: '#ef444420', color: 'var(--sell)', border: '1px solid #ef444440', fontWeight: 700 }}>SHORT</span>
+            : <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--surface-2)', color: 'var(--text-faint)', border: '1px solid var(--border)' }}>LONG</span>
           }
         </div>
-        <div className="flex items-center gap-2">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, flexWrap: 'wrap' }}>
           {sess.ai_enabled && (
-            <span className="text-xs mono" style={{ color: 'var(--text-faint)' }}>
+            <span style={{ fontSize: 10, fontFamily: 'monospace', color: 'var(--text-faint)' }}>
               {sess.ai_calls_this_hour}/{sess.max_calls_per_hour}/hr
             </span>
           )}
@@ -575,69 +528,60 @@ function SmartSessionRow({ sess, onStop, onResumeAi }: {
           </span>
           {isPaused && (
             <button onClick={() => onResumeAi(sess.session_id)}
-              className="px-2 py-1 rounded text-xs font-semibold"
-              style={{ background: 'var(--warn-bg)', color: 'var(--warning)', border: '1px solid var(--warn-bg)' }}>
+              style={{ padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700, cursor: 'pointer', background: 'var(--warn-bg)', color: 'var(--warning)', border: '1px solid var(--warn-bg)' }}>
               RESUME AI
             </button>
           )}
           {sess.active && (
-            <button onClick={() => onStop(sess.session_id)}
-              className="btn-stop">
-              STOP
-            </button>
+            <button onClick={() => onStop(sess.session_id)} className="btn-stop">STOP</button>
           )}
         </div>
       </div>
 
-      {/* Row 2: stats */}
-      <div className="flex items-center gap-4 text-xs flex-wrap">
-        <span style={{ color: 'var(--text-muted)' }}>
-          Open: <span className="font-semibold" style={{ color: 'var(--text)' }}>{sess.open_positions}</span>
-          <span style={{ color: 'var(--text-faint)' }}>/{sess.max_layers}</span>
-        </span>
-        <span style={{ color: 'var(--text-muted)' }}>
-          Opened: <span style={{ color: 'var(--text)' }}>{sess.total_opened}</span>
-        </span>
-        <span style={{ color: 'var(--text-muted)' }}>
-          W/<span style={{ color: 'var(--buy)' }}>{sess.total_closed_win}</span>
-          {' '}L/<span style={{ color: 'var(--sell)' }}>{sess.total_closed_loss}</span>
-        </span>
-        <span style={{ color: 'var(--text-muted)' }}>
-          Profit: <span className="font-semibold mono" style={{ color: pColor }}>
-            {profit >= 0 ? '+' : ''}${profit.toFixed(2)}
+      {/* Row 2: stats (left) + P&L (right) */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'var(--text-muted)', flexWrap: 'wrap', alignItems: 'center' }}>
+          <span>
+            <b style={{ color: 'var(--text)' }}>{sess.open_positions}</b>
+            <span style={{ color: 'var(--text-faint)' }}>/{sess.max_layers}</span>
+            {' '}open
           </span>
-        </span>
-        {sess.ai_enabled
-          ? <span style={{ color: 'var(--text-muted)' }}>
-              Entries/decision: <span style={{ color: 'var(--text)' }}>{sess.entries_per_decision}</span>
-            </span>
-          : <span style={{ color: 'var(--text-muted)' }}>
-              TP/SL ATR×<span style={{ color: 'var(--text)' }}>{sess.tp_atr_mult}/{sess.sl_atr_mult}</span>
-            </span>
-        }
-        <span style={{ color: 'var(--text-faint)' }}>
-          Up {Math.floor(sess.uptime_s / 60)}m {sess.uptime_s % 60}s
-        </span>
+          <span>
+            W:<b style={{ color: 'var(--buy)' }}>{sess.total_closed_win}</b>
+            {' '}L:<b style={{ color: 'var(--sell)' }}>{sess.total_closed_loss}</b>
+          </span>
+          {sess.ai_enabled
+            ? <span style={{ color: 'var(--text-faint)', fontSize: 10 }}>{sess.entries_per_decision} ent/dec</span>
+            : <span style={{ color: 'var(--text-faint)', fontSize: 10 }}>TP/SL ×{sess.tp_atr_mult}/{sess.sl_atr_mult}</span>
+          }
+          <span style={{ color: 'var(--text-faint)', fontSize: 10 }}>
+            Up {Math.floor(sess.uptime_s / 60)}m{sess.uptime_s % 60}s
+          </span>
+        </div>
+        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'monospace', color: pColor, lineHeight: 1.1 }}>
+            {profit >= 0 ? '+' : ''}${profit.toFixed(2)}
+          </div>
+        </div>
       </div>
 
-      {/* Row 3: last action */}
-      <div className="text-xs truncate" style={{ color: sess.error ? 'var(--sell)' : 'var(--text-faint)' }}>
+      {/* Row 3: last action / error */}
+      <div style={{ fontSize: 11, color: sess.error ? 'var(--sell)' : 'var(--text-faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {sess.error ? `ERROR: ${sess.error}` : sess.last_action}
       </div>
 
-      {/* Row 4: AI last reasoning (only if AI enabled and has reasoning) */}
+      {/* Row 4: AI last reasoning */}
       {sess.ai_enabled && sess.ai_last_reasoning && (
-        <div className="text-xs rounded px-2 py-1.5 leading-relaxed"
-          style={{ background: '#a78bfa08', border: '1px solid #a78bfa20', color: 'var(--text-muted)' }}>
-          <span className="font-semibold" style={{ color: '#a78bfa' }}>AI: </span>
+        <div style={{ fontSize: 11, borderRadius: 4, padding: '4px 8px', lineHeight: 1.5, background: '#a78bfa08', border: '1px solid #a78bfa20', color: 'var(--text-muted)' }}>
+          <span style={{ fontWeight: 700, color: '#a78bfa' }}>AI: </span>
           {sess.ai_last_decision && (
-            <span className="font-semibold mr-1"
-              style={{ color: sess.ai_last_decision === 'BUY' ? 'var(--buy)' : sess.ai_last_decision === 'SELL' ? 'var(--sell)' : 'var(--text-faint)' }}>
+            <span style={{ fontWeight: 700, marginRight: 4,
+              color: sess.ai_last_decision === 'BUY' ? 'var(--buy)' : sess.ai_last_decision === 'SELL' ? 'var(--sell)' : 'var(--text-faint)' }}>
               {sess.ai_last_decision}
             </span>
           )}
           {sess.ai_last_confidence > 0 && (
-            <span className="mr-1" style={{ color: 'var(--text-faint)' }}>
+            <span style={{ color: 'var(--text-faint)', marginRight: 4 }}>
               conf={sess.ai_last_confidence.toFixed(2)} ·{' '}
             </span>
           )}
@@ -1105,6 +1049,7 @@ function TradingPanel() {
           ⚠ NO VALIDATION — THIS ENGINE PLACES LIVE MT5 ORDERS WITHOUT ADDITIONAL CONFIRMATION
         </div>
         <div className="panel-body flex-shrink-0">
+          <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-faint)', letterSpacing: '0.6px', marginBottom: '5px' }}>CORE CONFIG</div>
           <div className="flex items-center gap-1.5 flex-wrap">
             <SymbolSelect value={aggrSymbol} onChange={setAggrSymbol} />
             <select value={direction} onChange={e => setDirection(e.target.value)}
@@ -1120,7 +1065,7 @@ function TradingPanel() {
                 background: 'var(--accent)20', color: 'var(--accent)',
                 border: '1px solid var(--accent)', whiteSpace: 'nowrap',
               }}>
-                M1+M5+M15 vote
+                M5+M15 vote
               </span>
             )}
             {direction === 'BOTH' && (
@@ -1136,28 +1081,28 @@ function TradingPanel() {
               Layers
               <input value={layers} onChange={e => setLayers(e.target.value)}
                 type="number" min="1" max="50"
-                className="rounded px-2 py-1 text-xs w-14"
+                className="rounded px-2 py-1.5 text-xs w-14"
                 style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} />
             </label>
             <label className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
               Vol
               <input value={volume} onChange={e => setVolume(e.target.value)}
                 type="number" min="0.01" step="0.01"
-                className="rounded px-2 py-1 text-xs w-16"
+                className="rounded px-2 py-1.5 text-xs w-16"
                 style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} />
             </label>
             <label className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
               Profit $
               <input value={profitTarget} onChange={e => setProfitTarget(e.target.value)}
                 type="number" min="0.01" step="0.1"
-                className="rounded px-2 py-1 text-xs w-16"
+                className="rounded px-2 py-1.5 text-xs w-16"
                 style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} />
             </label>
             {/* sl_pips hidden — always 0, engine uses profit monitoring instead */}
             <label className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
               Flip
               <select value={flipMode} onChange={e => setFlipMode(e.target.value)}
-                className="rounded px-2 py-1 text-xs w-24"
+                className="rounded px-2 py-1.5 text-xs w-24"
                 style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }}>
                 <option value="none">none</option>
                 <option value="percentile">percentile</option>
@@ -1170,7 +1115,7 @@ function TradingPanel() {
                 Pct
                 <input value={flipPercentile} onChange={e => setFlipPercentile(e.target.value)}
                   type="number" min="0.5" max="1" step="0.05"
-                  className="rounded px-2 py-1 text-xs w-16"
+                  className="rounded px-2 py-1.5 text-xs w-16"
                   style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} />
               </label>
             )}
@@ -1179,18 +1124,19 @@ function TradingPanel() {
                 After
                 <input value={flipAfter} onChange={e => setFlipAfter(e.target.value)}
                   type="number" min="1" max="20" step="1"
-                  className="rounded px-2 py-1 text-xs w-14"
+                  className="rounded px-2 py-1.5 text-xs w-14"
                   style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} />
               </label>
             )}
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap" style={{ marginTop: '6px' }}>
+          <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-faint)', letterSpacing: '0.6px', marginTop: '10px', marginBottom: '5px' }}>RISK CONTROLS</div>
+          <div className="flex items-center gap-2 flex-wrap">
             <label className="flex items-center gap-1 text-xs cursor-pointer select-none"
               style={{ color: trendGuided ? 'var(--buy)' : 'var(--text-muted)' }}>
               <input type="checkbox" checked={trendGuided} onChange={e => setTrendGuided(e.target.checked)}
                 className="w-3 h-3 accent-emerald-500" />
-              Trend Guide (M1+M5+M15)
+              Trend Guide
             </label>
             <label className="flex items-center gap-1 text-xs cursor-pointer select-none"
               style={{ color: mcGuard ? 'var(--warning)' : 'var(--text-muted)' }}>
@@ -1203,21 +1149,21 @@ function TradingPanel() {
                 MC%
                 <input value={mcLevelPct} onChange={e => setMcLevelPct(e.target.value)}
                   type="number" min="0.01" max="0.5" step="0.01"
-                  className="rounded px-2 py-1 text-xs w-16"
+                  className="rounded px-2 py-1.5 text-xs w-16"
                   style={{ background: 'var(--surface-2)', border: '1px solid var(--warning)', color: 'var(--text)' }} />
               </label>
               <label className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
                 Safety×
                 <input value={safetyMultiplier} onChange={e => setSafetyMultiplier(e.target.value)}
                   type="number" min="1" step="0.5"
-                  className="rounded px-2 py-1 text-xs w-14"
+                  className="rounded px-2 py-1.5 text-xs w-14"
                   style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} />
               </label>
               <label className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
                 Emrg×
                 <input value={emergencyMultiplier} onChange={e => setEmergencyMultiplier(e.target.value)}
                   type="number" min="1" step="0.5"
-                  className="rounded px-2 py-1 text-xs w-14"
+                  className="rounded px-2 py-1.5 text-xs w-14"
                   style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }} />
               </label>
             </>)}
@@ -1227,41 +1173,42 @@ function TradingPanel() {
               <input value={slLossMultiplier} onChange={e => setSlLossMultiplier(e.target.value)}
                 type="number" min="0" step="0.5"
                 title="Hard SL: close immediately when floating loss ≥ N × profit_target. 0 = disabled."
-                className="rounded px-2 py-1 text-xs w-14"
+                className="rounded px-2 py-1.5 text-xs w-14"
                 style={{ background: 'var(--surface-2)', border: `1px solid ${parseFloat(slLossMultiplier) > 0 ? 'var(--sell)' : 'var(--border)'}`, color: 'var(--text)' }} />
             </label>
             <label className="flex items-center gap-1 text-xs"
               style={{ color: parseFloat(slCooldownSec) > 0 ? 'var(--sell)' : 'var(--text-muted)' }}>
-              Cooldown s
+              SL Cooldown
               <input value={slCooldownSec} onChange={e => setSlCooldownSec(e.target.value)}
                 type="number" min="0" step="10"
                 title="SL Cooldown: wait N seconds after any SL event before reopening positions. Prevents revenge trading. 0 = disabled."
-                className="rounded px-2 py-1 text-xs w-14"
+                className="rounded px-2 py-1.5 text-xs w-14"
                 style={{ background: 'var(--surface-2)', border: `1px solid ${parseFloat(slCooldownSec) > 0 ? 'var(--sell)' : 'var(--border)'}`, color: 'var(--text)' }} />
             </label>
             <label className="flex items-center gap-1 text-xs"
               style={{ color: parseFloat(maxSessionLossUsd) > 0 ? 'var(--warning)' : 'var(--text-muted)' }}>
-              Loss $
+              Max Loss $
               <input value={maxSessionLossUsd} onChange={e => setMaxSessionLossUsd(e.target.value)}
                 type="number" min="0" step="1"
                 title="Profit Guard floor: stop session when net loss exceeds this amount. 0 = disabled."
-                className="rounded px-2 py-1 text-xs w-14"
+                className="rounded px-2 py-1.5 text-xs w-14"
                 style={{ background: 'var(--surface-2)', border: `1px solid ${parseFloat(maxSessionLossUsd) > 0 ? 'var(--warning)' : 'var(--border)'}`, color: 'var(--text)' }} />
             </label>
             <label className="flex items-center gap-1 text-xs"
               style={{ color: parseFloat(maxDrawdownFromPeak) > 0 ? 'var(--warning)' : 'var(--text-muted)' }}>
-              DD $
+              Max DD $
               <input value={maxDrawdownFromPeak} onChange={e => setMaxDrawdownFromPeak(e.target.value)}
                 type="number" min="0" step="1"
                 title="Profit Guard drawdown: stop session when profit drops this much from peak. 0 = disabled."
-                className="rounded px-2 py-1 text-xs w-14"
+                className="rounded px-2 py-1.5 text-xs w-14"
                 style={{ background: 'var(--surface-2)', border: `1px solid ${parseFloat(maxDrawdownFromPeak) > 0 ? 'var(--warning)' : 'var(--border)'}`, color: 'var(--text)' }} />
             </label>
-          {/* HMM Gate row — full-width inside the same flex container */}
-          <div style={{ width: '100%', borderTop: '1px solid var(--border)', paddingTop: 6,
+          {/* HMM Gate section */}
+          <div style={{ width: '100%', borderTop: '1px solid var(--border)', paddingTop: 8,
             display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ width: '100%', fontSize: '10px', fontWeight: 700, color: '#a78bfa80', letterSpacing: '0.6px', marginBottom: '2px' }}>HMM GATE</span>
             <label className="flex items-center gap-1 text-xs cursor-pointer select-none"
-              title="HMM Gate: sebelum buka posisi, cek kondisi bahaya dari analisa HMM M1+M5+M15 (S/R trap, extreme momentum, divergence). Jika bahaya ditemukan → cooldown, tunggu vote HMM konfirmasi arah."
+              title="HMM Gate: sebelum buka posisi, cek kondisi bahaya dari analisa HMM M5+M15 (S/R trap, extreme momentum, divergence). Jika bahaya ditemukan → cooldown, tunggu vote HMM konfirmasi arah."
               style={{ color: hmmGateEnabled ? '#a78bfa' : 'var(--text-muted)', fontWeight: hmmGateEnabled ? 700 : 400 }}>
               <input type="checkbox" checked={hmmGateEnabled} onChange={e => setHmmGateEnabled(e.target.checked)}
                 className="w-3 h-3" style={{ accentColor: '#a78bfa' }} />
@@ -1273,21 +1220,22 @@ function TradingPanel() {
                 <input value={hmmCooldownSec} onChange={e => setHmmCooldownSec(e.target.value)}
                   type="number" min="10" step="10"
                   title="Durasi cooldown (detik) saat HMM gate mendeteksi bahaya. Engine pause, lalu tunggu HMM vote konfirmasi sebelum reopen."
-                  className="rounded px-2 py-1 text-xs w-14"
+                  className="rounded px-2 py-1.5 text-xs w-14"
                   style={{ background: 'var(--surface-2)', border: '1px solid #a78bfa55', color: 'var(--text)' }} />
               </label>
             )}
             <label className="flex items-center gap-1 text-xs cursor-pointer select-none"
-              title="Auto Direction HMM: gunakan analisa HMM M1+M5+M15 (bukan EMA) untuk menentukan arah BUY/SELL saat mode AUTO, dan update arah mid-session setelah setiap TP close."
+              title="Auto Direction HMM: gunakan analisa HMM M5+M15 (bukan EMA) untuk menentukan arah BUY/SELL saat mode AUTO, dan update arah mid-session setelah setiap TP close."
               style={{ color: autoDirectionHmm ? '#a78bfa' : 'var(--text-muted)', fontWeight: autoDirectionHmm ? 700 : 400 }}>
               <input type="checkbox" checked={autoDirectionHmm} onChange={e => setAutoDirectionHmm(e.target.checked)}
                 className="w-3 h-3" style={{ accentColor: '#a78bfa' }} />
               Auto Dir HMM
             </label>
           </div>
-          {/* Limit Order row — full-width inside the same flex container */}
-          <div style={{ width: '100%', borderTop: '1px solid var(--border)', paddingTop: 6,
+          {/* Limit Order section */}
+          <div style={{ width: '100%', borderTop: '1px solid var(--border)', paddingTop: 8,
             display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ width: '100%', fontSize: '10px', fontWeight: 700, color: '#34d39980', letterSpacing: '0.6px', marginBottom: '2px' }}>ENTRY ORDERS</span>
             <label className="flex items-center gap-1 text-xs cursor-pointer select-none"
               title="Limit Order: ganti market order dengan pending BUY_LIMIT/SELL_LIMIT di harga lebih rendah/tinggi dari harga saat ini (offset = ATR × mult). Hindari beli di pucuk / jual di bawah."
               style={{ color: limitOrderEnabled ? '#34d399' : 'var(--text-muted)', fontWeight: limitOrderEnabled ? 700 : 400 }}>
@@ -1301,7 +1249,7 @@ function TradingPanel() {
                 <input value={limitAtrMult} onChange={e => setLimitAtrMult(e.target.value)}
                   type="number" min="0.01" max="1" step="0.01"
                   title="Offset limit dari harga pasar = ATR(M1,14) × mult. Contoh: 0.1 = 10% ATR di bawah ask (BUY) atau di atas bid (SELL)."
-                  className="rounded px-2 py-1 text-xs w-16"
+                  className="rounded px-2 py-1.5 text-xs w-16"
                   style={{ background: 'var(--surface-2)', border: '1px solid #34d39955', color: 'var(--text)' }} />
               </label>
               <label className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
@@ -1309,7 +1257,7 @@ function TradingPanel() {
                 <input value={pendingExpirySec} onChange={e => setPendingExpirySec(e.target.value)}
                   type="number" min="5" max="300" step="5"
                   title="Batalkan pending order jika belum terisi dalam N detik. Default 15s — cocok untuk XAUUSD pasar cepat."
-                  className="rounded px-2 py-1 text-xs w-14"
+                  className="rounded px-2 py-1.5 text-xs w-14"
                   style={{ background: 'var(--surface-2)', border: '1px solid #34d39955', color: 'var(--text)' }} />
               </label>
             </>)}
@@ -1329,7 +1277,7 @@ function TradingPanel() {
                 }
               }}
               title={`Calc Guard: Loss $ = layers × (SL× × profit_target) × 1.5 | DD $ = Loss $ × 0.5\nSL× must be > 0`}
-              className="text-xs px-2 py-1 rounded"
+              className="text-xs px-2 py-1.5 rounded"
               style={{ background: 'var(--surface-2)', color: 'var(--buy)', border: '1px solid var(--buy)', cursor: 'pointer', whiteSpace: 'nowrap', fontWeight: 600 }}
             >
               Calc Guard
@@ -1551,6 +1499,7 @@ function TradingPanel() {
       {/* ── CASCADE tab ── */}
       {engineTab === 'cascade' && (
         <div className="panel-body flex-shrink-0">
+          <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-faint)', letterSpacing: '0.6px', marginBottom: '8px' }}>CASCADE CONFIG</div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '6px' }}>
             {/* Symbol — uses dropdown instead of text input */}
             <div>
@@ -1748,125 +1697,118 @@ function CascadeSessionRow({ sess, onStop }: { sess: CascadeSession; onStop: (id
   const mcColor = MC_COLOR[sess.mc_status] ?? 'var(--text-muted)'
   const pColor  = sess.total_profit > 0 ? 'var(--buy)' : sess.total_profit < 0 ? 'var(--sell)' : 'var(--text-muted)'
 
-  const totalOpen  = sess.batches.reduce((s, b) => s + b.open, 0)
-  const totalTp    = sess.batches.reduce((s, b) => s + b.closed_tp, 0)
-  const totalSl    = sess.batches.reduce((s, b) => s + b.closed_sl, 0)
+  const totalOpen = sess.batches.reduce((s, b) => s + b.open, 0)
+  const totalTp   = sess.batches.reduce((s, b) => s + b.closed_tp, 0)
+  const totalSl   = sess.batches.reduce((s, b) => s + b.closed_sl, 0)
 
   return (
     <div style={{
       background: 'var(--surface-2)', border: '1px solid var(--border)',
-      borderRadius: '8px', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px',
+      borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6,
     }}>
-      {/* Row 1: symbol + direction + status + stop */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+
+      {/* Row 1: identity + direction + MC + actions */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <span style={{
             width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
             background: sess.active ? 'var(--buy)' : 'var(--text-faint)',
             animation: sess.active ? 'pulse 2s infinite' : 'none',
           }} />
-          <span style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text)' }}>
+          <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text)', whiteSpace: 'nowrap' }}>
             {sess.symbol}
           </span>
           <span style={{
-            padding: '1px 7px', borderRadius: '4px', fontSize: '11px', fontWeight: 700,
-            background: sess.current_direction === 'BUY' ? 'var(--buy-bg,#10b98120)' : 'var(--sell-bg,#ef444420)',
+            padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap',
+            background: sess.current_direction === 'BUY' ? '#10b98120' : '#ef444420',
             color: sess.current_direction === 'BUY' ? 'var(--buy)' : 'var(--sell)',
+            border: `1px solid ${sess.current_direction === 'BUY' ? 'var(--buy)40' : 'var(--sell)40'}`,
           }}>{sess.current_direction}</span>
-
-          {/* MCGuard badge */}
           <span style={{
-            padding: '1px 7px', borderRadius: '4px', fontSize: '10px', fontWeight: 700,
-            border: `1px solid ${mcColor}`, color: mcColor,
-          }}>
-            {sess.mc_status}
-          </span>
+            padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+            border: `1px solid ${mcColor}40`, color: mcColor,
+            background: `${mcColor}10`,
+          }}>{sess.mc_status}</span>
         </div>
-        <div className="flex items-center gap-1">
-          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-            {Math.floor(sess.uptime_s / 60)}m {sess.uptime_s % 60}s
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>
+            Up {Math.floor(sess.uptime_s / 60)}m{sess.uptime_s % 60}s
           </span>
           {sess.active && (
-            <button onClick={() => onStop(sess.session_id)}
-              style={{ padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600,
-                background: 'transparent', border: '1px solid var(--sell)', color: 'var(--sell)', cursor: 'pointer' }}>
-              STOP
-            </button>
+            <button onClick={() => onStop(sess.session_id)} className="btn-stop">STOP</button>
           )}
         </div>
       </div>
 
-      {/* Row 2: stats */}
-      <div style={{ display: 'flex', gap: '14px', fontSize: '11px', flexWrap: 'wrap' }}>
-        <span style={{ color: 'var(--text-muted)' }}>Open <b style={{ color: 'var(--text)' }}>{totalOpen}</b>/{sess.max_positions}</span>
-        <span style={{ color: 'var(--text-muted)' }}>TP <b style={{ color: 'var(--buy)' }}>{totalTp}</b></span>
-        <span style={{ color: 'var(--text-muted)' }}>SL <b style={{ color: 'var(--sell)' }}>{totalSl}</b></span>
-        {sess.total_closed_emergency > 0 && (
-          <span style={{ color: '#7c3aed' }}>EMG <b>{sess.total_closed_emergency}</b></span>
-        )}
-        <span style={{ color: pColor, fontWeight: 700 }}>
-          {sess.total_profit >= 0 ? '+' : ''}${sess.total_profit.toFixed(2)}
-        </span>
-      </div>
-
-      {/* Row 3: batch breakdown */}
-      {sess.batches.length > 0 && (
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-          {sess.batches.map(b => (
-            <span key={b.batch_id} style={{
-              padding: '1px 6px', borderRadius: '4px', fontSize: '10px',
-              background: 'var(--surface)', border: '1px solid var(--border)',
-              color: b.direction === 'BUY' ? 'var(--buy)' : 'var(--sell)',
-            }}>
-              {b.direction} ×{b.open}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Row 3b: Profit Guard stats */}
-      {(sess.peak_profit > 0 || sess.floating_pnl !== 0) && (
-        <div style={{ display: 'flex', gap: '12px', fontSize: '11px', flexWrap: 'wrap' }}>
-          <span style={{ color: 'var(--text-muted)' }}>
-            Net: <b style={{ color: (sess.total_net ?? 0) >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
-              {(sess.total_net ?? 0) >= 0 ? '+' : ''}${(sess.total_net ?? 0).toFixed(2)}
-            </b>
+      {/* Row 2: stats (left) + P&L (right) */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'var(--text-muted)', flexWrap: 'wrap', alignItems: 'center' }}>
+          <span>
+            <b style={{ color: 'var(--text)' }}>{totalOpen}</b>
+            <span style={{ color: 'var(--text-faint)' }}>/{sess.max_positions}</span>
+            {' '}open
           </span>
-          {sess.floating_pnl !== 0 && (
-            <span style={{ color: 'var(--text-muted)' }}>
-              Float: <b style={{ color: sess.floating_pnl >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
-                {sess.floating_pnl >= 0 ? '+' : ''}${sess.floating_pnl.toFixed(2)}
-              </b>
+          <span>TP:<b style={{ color: 'var(--buy)' }}>{totalTp}</b></span>
+          {totalSl > 0 && <span>SL:<b style={{ color: 'var(--sell)' }}>{totalSl}</b></span>}
+          {sess.total_closed_emergency > 0 && (
+            <span>EMG:<b style={{ color: '#7c3aed' }}>{sess.total_closed_emergency}</b></span>
+          )}
+          {/* Batch breakdown — inline chips */}
+          {sess.batches.length > 0 && (
+            <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {sess.batches.map(b => (
+                <span key={b.batch_id} style={{
+                  padding: '0 5px', borderRadius: 3, fontSize: 10,
+                  background: 'var(--surface)', border: '1px solid var(--border)',
+                  color: b.direction === 'BUY' ? 'var(--buy)' : 'var(--sell)',
+                }}>
+                  {b.direction[0]}×{b.open}
+                </span>
+              ))}
             </span>
+          )}
+        </div>
+        {/* Right: P&L block */}
+        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'monospace', color: pColor, lineHeight: 1.1 }}>
+            {sess.total_profit >= 0 ? '+' : ''}${sess.total_profit.toFixed(2)}
+          </div>
+          {sess.floating_pnl !== 0 && (
+            <div style={{ fontSize: 10, fontFamily: 'monospace', color: sess.floating_pnl >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
+              float {sess.floating_pnl >= 0 ? '+' : ''}${sess.floating_pnl.toFixed(2)}
+            </div>
           )}
           {sess.peak_profit > 0 && (
-            <span style={{ color: 'var(--text-muted)' }}>
-              Peak: <b style={{ color: 'var(--buy)' }}>${sess.peak_profit.toFixed(2)}</b>
-            </span>
+            <div style={{ fontSize: 10, fontFamily: 'monospace', color: 'var(--text-faint)' }}>
+              peak ${sess.peak_profit.toFixed(2)}
+            </div>
+          )}
+          {(sess.total_net ?? 0) !== 0 && (sess.total_net ?? 0) !== sess.total_profit && (
+            <div style={{ fontSize: 10, fontFamily: 'monospace', color: (sess.total_net ?? 0) >= 0 ? 'var(--buy)' : 'var(--sell)' }}>
+              net {(sess.total_net ?? 0) >= 0 ? '+' : ''}${(sess.total_net ?? 0).toFixed(2)}
+            </div>
           )}
         </div>
-      )}
+      </div>
 
-      {/* Row 4: last action */}
-      <div style={{ fontSize: '11px', color: sess.error ? 'var(--sell)' : 'var(--text-faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+      {/* Row 3: last action / error */}
+      <div style={{ fontSize: 11, color: sess.error ? 'var(--sell)' : 'var(--text-faint)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {sess.error ? `ERR: ${sess.error}` : sess.last_action}
       </div>
 
-      {/* Row 5: recommendation (only when stopped) */}
+      {/* Row 4: recommendation (stopped only) */}
       {!sess.active && sess.next_recommendation && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', marginTop: '2px' }}>
-          <span style={{ color: 'var(--text-muted)' }}>Rekomendasi sesi berikutnya:</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginTop: 2 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Next session:</span>
           <span style={{
-            fontWeight: 700, padding: '1px 8px', borderRadius: '4px',
+            fontWeight: 700, padding: '1px 8px', borderRadius: 4,
             background: sess.next_recommendation === 'BUY'  ? '#10b98120' :
                         sess.next_recommendation === 'SELL' ? '#ef444420' : 'var(--surface)',
             color:      sess.next_recommendation === 'BUY'  ? 'var(--buy)'  :
                         sess.next_recommendation === 'SELL' ? 'var(--sell)' : 'var(--text-muted)',
             border: `1px solid ${sess.next_recommendation === 'BUY' ? 'var(--buy)' : sess.next_recommendation === 'SELL' ? 'var(--sell)' : 'var(--border)'}`,
-          }}>
-            {sess.next_recommendation}
-          </span>
-          <span style={{ color: 'var(--text-faint)', fontSize: '10px' }}>M1+M5+M15 vote</span>
+          }}>{sess.next_recommendation}</span>
+          <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>M5+M15 vote</span>
         </div>
       )}
     </div>
